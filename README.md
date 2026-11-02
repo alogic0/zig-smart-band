@@ -2,6 +2,7 @@
 
 A Linux command-line tool written in Zig 0.17.0 for Xiaomi Smart Band battery
 and device information, plus authenticated notifications from scripts.
+It can also synchronize the band's clock with the computer.
 
 It uses BlueZ over D-Bus through `libsystemd.so.0`, and OpenSSL 3 for B-163
 key exchange. AES and packet checksums use Zig's standard library. No Python,
@@ -24,6 +25,7 @@ zig build
 ./zig-out/bin/smart-band battery
 ./zig-out/bin/smart-band inspect
 ./zig-out/bin/smart-band notify "Build finished"
+./zig-out/bin/smart-band sync-time
 ```
 
 The same commands work through `zig build run -- COMMAND`.
@@ -77,6 +79,33 @@ Invalid notification text, key files, and configurations fail before Bluetooth a
   full UUIDs, and access flags. Unidentified UUIDs are explicitly labeled unknown.
 - `notify MESSAGE`: authenticate, negotiate services, and send a Zepp OS alert
   titled `PC`, with app name `Desktop`. Quote messages containing spaces.
+- `sync-time`: authenticate and set the configured band's clock to the computer's
+  current local date, time, and UTC offset, then verify the clock by reading it back.
+
+## Clock synchronization
+
+```sh
+./zig-out/bin/smart-band sync-time
+```
+
+This uses the same saved pairing key and Bluetooth setup retries as `notify`.
+The clock is sampled after connection and authentication, so time spent searching
+for the band does not make the update stale. The command reports the timestamp
+and UTC offset being sent. Its read-back check allows five seconds of clock drift.
+The time write is never automatically replayed after an uncertain result.
+
+The computer's local timezone is used, including its current daylight-saving
+offset. To select another timezone for one invocation, use the `TZ` environment
+variable, for example:
+
+```sh
+TZ=UTC ./zig-out/bin/smart-band sync-time
+```
+
+The update contains the current offset rather than timezone transition rules;
+resynchronize when the desired offset changes. The band uses the Zepp OS
+11-byte Current Time layout. A 10-byte standard read-back confirms the clock
+but cannot independently confirm the supplied UTC offset; the output notes this.
 
 ## Service and characteristic names
 
@@ -172,9 +201,9 @@ seconds. Read-only requests retry once after a transport failure; notification
 writes are not replayed. An initial battery read lets a fresh link settle.
 
 Battery/info commands still use ordinary readable GATT services. Authentication
-is currently performed for notifications. The tool does not pair, unbind, reset,
-or update firmware. The optional screen-wake preference above is the only band
-setting it changes. NFC payments, history, and health data
+is performed for notifications and clock synchronization. The tool does not pair,
+unbind, reset, or update firmware. It changes the clock only with `sync-time`
+and the screen-wake preference only when explicitly configured. NFC payments, history, and health data
 are outside this version.
 
 ## Validation
@@ -196,6 +225,8 @@ service version 3. An initial authenticated write did not display; the band
 requested an app icon. After implementing the icon upload and acknowledgment,
 the user confirmed that the notification appeared on the band. A second
 notification over a fresh connection also appeared, using the cached icon.
+Clock synchronization was also tested: the band accepted the computer's local
+time and UTC offset, and its Current Time read-back matched the system clock.
 The screen-wake setting was read back as enabled, and the user confirmed that
 a subsequent notification woke the display without touch or wrist movement.
 Other models and firmware versions have not been tested.

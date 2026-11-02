@@ -5,6 +5,7 @@ const dbus = @import("dbus.zig");
 const bluez = @import("bluez.zig");
 const b163 = @import("b163.zig");
 const notification = @import("notification.zig");
+const band_time = @import("band_time.zig");
 const Aes = std.crypto.core.aes.Aes128;
 const Crc = std.hash.Crc32;
 const Io = std.Io;
@@ -165,7 +166,20 @@ const Session = struct {
     }
 };
 
+const Action = union(enum) {
+    notification: struct { text: []const u8, wake_screen: ?bool },
+    sync_time: *Io.Writer,
+};
+
 pub fn notify(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []const bluez.Node, device: bluez.Node, secret: [16]u8, text: []const u8, wake_screen: ?bool) !void {
+    try run(a, io, connection, nodes, device, secret, .{ .notification = .{ .text = text, .wake_screen = wake_screen } });
+}
+
+pub fn syncTime(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []const bluez.Node, device: bluez.Node, secret: [16]u8, out: *Io.Writer) !void {
+    try run(a, io, connection, nodes, device, secret, .{ .sync_time = out });
+}
+
+fn run(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []const bluez.Node, device: bluez.Node, secret: [16]u8, action: Action) !void {
     const writer = bluez.findCharacteristic(nodes, device.path, write_uuid) orelse return error.AuthenticatedServiceUnavailable;
     const reader = bluez.findCharacteristic(nodes, device.path, read_uuid) orelse return error.AuthenticatedServiceUnavailable;
     var receiver: dbus.Receiver = .{ .connection = connection, .path = reader.path };
@@ -200,6 +214,13 @@ pub fn notify(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes:
     const accepted = try session.receive(0x82);
     if (!std.mem.eql(u8, accepted, "\x10\x05\x01")) return error.BandAuthenticationFailed;
     std.debug.print("Band authentication succeeded.\n", .{});
+    const alert = switch (action) {
+        .sync_time => |out| {
+            try band_time.sync(a, io, connection, nodes, device, out);
+            return;
+        },
+        .notification => |value| value,
+    };
     try session.send(0x15, &.{1}, false);
     const mtu_reply = try session.receive(0x15);
     if (mtu_reply.len != 3 or mtu_reply[0] != 2) return error.InvalidBluetoothMtu;
@@ -210,7 +231,7 @@ pub fn notify(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes:
     const services = try session.receive(0);
     const encrypted_notifications = try serviceEncryption(services, 0x1e);
     const encrypted_files = try serviceEncryption(services, 0x0d);
-    if (wake_screen) |enabled| {
+    if (alert.wake_screen) |enabled| {
         const encrypted_config = try serviceEncryption(services, 0x0a);
         try setNotificationWake(&session, encrypted_config, enabled);
     }
@@ -218,7 +239,7 @@ pub fn notify(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes:
     try session.send(0x1e, &.{1}, encrypted_notifications);
     const capabilities = try notification.Capabilities.parse(try session.receive(0x1e));
     std.debug.print("Notification service version {d}.\n", .{capabilities.version});
-    const payload = try notification.encodeAuthenticated(a, text, capabilities, session.sequence);
+    const payload = try notification.encodeAuthenticated(a, alert.text, capabilities, session.sequence);
     defer a.free(payload);
     try session.send(0x1e, payload, encrypted_notifications);
     // A write acknowledgment is not display confirmation. Keep processing requests

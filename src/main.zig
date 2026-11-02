@@ -44,6 +44,7 @@ fn help(out: *Io.Writer) !void {
         \\  smart-band battery [ADDRESS]  Read battery percentage
         \\  smart-band inspect [ADDRESS]  List the device's GATT services and characteristics
         \\  smart-band notify MESSAGE     Send a text alert to the configured band
+        \\  smart-band sync-time          Sync the band to the computer's local time
         \\  smart-band --help
         \\
         \\The default device is read from $XDG_CONFIG_HOME/smart-band/config.zon
@@ -52,6 +53,7 @@ fn help(out: *Io.Writer) !void {
         \\An optional ADDRESS overrides the config (for example AA:BB:CC:DD:EE:FF).
         \\notify writes an alert; it does not pair, reset, unbind, or update firmware.
         \\notify authenticates using auth-key.hex beside the config, or auth_key_file.
+        \\sync-time uses the same key and verifies the clock with a GATT read-back.
         \\Optional notification_wake_screen sets and verifies the band's screen-wake preference.
         \\Bluetooth setup defaults: search 60s, connect 30s, services 30s, up to 3 attempts.
         \\Override these limits in the config's bluetooth section.
@@ -85,8 +87,10 @@ fn execute(init: std.process.Init) !void {
     const battery = std.mem.eql(u8, command[0], "battery");
     const inspect = std.mem.eql(u8, command[0], "inspect");
     const notify = std.mem.eql(u8, command[0], "notify");
-    if (!scan and !info and !battery and !inspect and !notify) return error.UnknownCommand;
+    const sync_time = std.mem.eql(u8, command[0], "sync-time");
+    if (!scan and !info and !battery and !inspect and !notify and !sync_time) return error.UnknownCommand;
     if (command.len > 2) return error.InvalidArguments;
+    if (sync_time and command.len != 1) return error.InvalidArguments;
     if (notify) {
         if (command.len != 2) return error.InvalidArguments;
         try notification.validate(command[1]);
@@ -100,11 +104,11 @@ fn execute(init: std.process.Init) !void {
     var auth_key: ?[16]u8 = null;
     var wake_screen: ?bool = null;
     defer if (auth_key) |*key| std.crypto.secureZero(u8, key);
-    const address = if (scan) "" else if (!notify and command.len == 2) command[1] else blk: {
+    const address = if (scan) "" else if (!notify and !sync_time and command.len == 2) command[1] else blk: {
         const path = config_path orelse try config.defaultPath(a, init.environ_map);
         const saved = try config.load(a, io, path);
         bluetooth = saved.bluetooth;
-        if (notify) auth_key = try config.loadAuthKey(a, io, path, saved);
+        if (notify or sync_time) auth_key = try config.loadAuthKey(a, io, path, saved);
         if (notify) wake_screen = saved.notification_wake_screen;
         break :blk saved.device.address;
     };
@@ -129,7 +133,10 @@ fn execute(init: std.process.Init) !void {
     const nodes = ready.nodes;
     const device = ready.device;
 
-    if (notify) {
+    if (sync_time) {
+        _ = try readBattery(a, io, &connection, nodes, device);
+        try zepp.syncTime(a, io, &connection, nodes, device, auth_key.?, out);
+    } else if (notify) {
         _ = try readBattery(a, io, &connection, nodes, device);
         try zepp.notify(a, io, &connection, nodes, device, auth_key.?, command[1], wake_screen);
         try out.writeAll("Authenticated notification written; check the band for display confirmation.\n");
@@ -212,4 +219,5 @@ test {
     _ = @import("b163.zig");
     _ = @import("connect.zig");
     _ = @import("gatt_names.zig");
+    _ = @import("band_time.zig");
 }
