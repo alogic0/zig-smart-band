@@ -1,0 +1,9 @@
+.{
+    .device = .{
+        .name = "My Xiaomi Smart Band 7",
+        .address = "AA:BB:CC:DD:EE:FF",
+    },
+    .auth_key_file = "auth-key.hex",
+    // Set true/false to change persistent screen wake, or null to preserve it.
+    .notification_wake_screen = null,
+}
