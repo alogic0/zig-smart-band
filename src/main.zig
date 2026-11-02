@@ -3,6 +3,7 @@ const dbus = @import("dbus.zig");
 const bluez = @import("bluez.zig");
 const config = @import("config.zig");
 const notification = @import("notification.zig");
+const gatt_names = @import("gatt_names.zig");
 const zepp = @import("zepp.zig");
 const A = std.mem.Allocator;
 const Io = std.Io;
@@ -184,8 +185,11 @@ fn execute(init: std.process.Init) !void {
         try out.print("{s} ({s})\n", .{ device.name orelse "(unnamed)", address });
         for (nodes) |node| {
             if (!bluez.belongsTo(node.path, device.path) or node.uuid == null) continue;
-            try out.print("{s} {s}{s}{s}{s}{s}\n", .{
-                if (node.service) "service" else "characteristic",
+            const kind: gatt_names.Kind = if (node.service) .service else .characteristic;
+            const label = gatt_names.lookup(kind, node.uuid.?) orelse if (node.service) "Unknown service" else "Unknown characteristic";
+            try out.print("{s} {s} ({s}){s}{s}{s}{s}\n", .{
+                if (node.service) "service" else "  characteristic",
+                label,
                 node.uuid.?,
                 if (node.readable) " read" else "",
                 if (node.writable) " write" else "",
@@ -254,4 +258,5 @@ test {
     _ = @import("notification.zig");
     _ = @import("zepp.zig");
     _ = @import("b163.zig");
+    _ = @import("gatt_names.zig");
 }

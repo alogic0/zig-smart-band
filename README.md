@@ -73,9 +73,25 @@ Invalid notification text, key files, and configurations fail before Bluetooth a
   Unavailable fields are explicit; failure to read any values exits unsuccessfully.
 - `battery [ADDRESS]`: read the percentage. GATT reads take priority over BlueZ's
   optional cached Battery1 property. Values outside 0–100 fail.
-- `inspect [ADDRESS]`: list GATT services, characteristics, and access flags.
+- `inspect [ADDRESS]`: list GATT services and characteristics with readable names,
+  full UUIDs, and access flags. Unidentified UUIDs are explicitly labeled unknown.
 - `notify MESSAGE`: authenticate, negotiate services, and send a Zepp OS alert
   titled `PC`, with app name `Desktop`. Quote messages containing spaces.
+
+## Service and characteristic names
+
+`inspect` shows names first and keeps UUIDs available for protocol debugging:
+
+```text
+service Battery Service (0000180f-0000-1000-8000-00805f9b34fb)
+  characteristic Battery Level (00002a19-0000-1000-8000-00805f9b34fb) read notify
+```
+
+The catalog is in [src/gatt_names.zig](src/gatt_names.zig). It includes standard
+Bluetooth names and known Huami channels, with case-insensitive matching of full
+UUIDs. Unknown identifiers retain their UUID and an explicit unknown label.
+Vendor channels labeled `Legacy` use older protocol assignments; their name
+alone does not establish which commands a particular firmware implements.
 
 ## Authenticated notifications
 
