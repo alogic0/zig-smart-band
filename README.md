@@ -135,15 +135,41 @@ duration. Other display preferences are left unchanged.
 
 Keep the band nearby and awake. Temporarily turn off phone Bluetooth when Zepp
 Life or Mi Fitness is connected to the band. The tool uses Bluetooth LE discovery,
-looks for unknown addresses for up to 30 seconds, connects, and waits for services.
+looks for unknown addresses for up to 60 seconds, connects, and waits for services.
 Connections opened by the tool are closed on normal and handled-error exits;
 preexisting connections are preserved.
 
-D-Bus calls normally time out after five seconds; connect/write calls use fifteen
-seconds. Service discovery allows fifteen seconds, and protocol responses twenty.
-These are per-phase limits, rather than a whole-command deadline. Cleanup may take
-another five seconds. Read-only requests retry once after a transport failure;
-notification writes are not replayed. An initial battery read lets a fresh link settle.
+Connection setup allows 30 seconds for connecting and another 30 seconds for
+service discovery. An early disconnect or transport failure during setup is
+cleaned up and retried, up to three setup attempts with a two-second pause.
+Unknown-device discovery can run again on a later attempt. Each attempt starts
+with a fresh BlueZ snapshot; an already connected device skips the connect call.
+Authentication, settings changes, and notification writes happen after setup
+retries finish. They are never replayed by this loop.
+
+The limits are optional fields in the config's root `bluetooth` section:
+
+```zig
+.bluetooth = .{
+    .search_timeout_seconds = 60,
+    .connect_timeout_seconds = 30,
+    .service_timeout_seconds = 30,
+    .connect_attempts = 3,
+    .retry_delay_seconds = 2,
+},
+```
+
+Search accepts 1–600 seconds, connect/service timeouts 1–120 seconds, attempts
+1–5, and retry delay 0–10 seconds. Set `connect_attempts` to 1 to disable setup
+retries. Existing configs use the defaults above. Explicit address overrides
+bypass the device config and use defaults; `scan [seconds]` retains its own
+1–60 second duration.
+
+These are per-attempt, per-phase limits, rather than a whole-command deadline.
+Other D-Bus calls normally time out after five seconds; application writes allow
+fifteen seconds, and protocol responses twenty. Cleanup may take another five
+seconds. Read-only requests retry once after a transport failure; notification
+writes are not replayed. An initial battery read lets a fresh link settle.
 
 Battery/info commands still use ordinary readable GATT services. Authentication
 is currently performed for notifications. The tool does not pair, unbind, reset,

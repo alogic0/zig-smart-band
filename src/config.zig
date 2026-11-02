@@ -1,8 +1,10 @@
 const std = @import("std");
 const bluez = @import("bluez.zig");
+const connect = @import("connect.zig");
 const A = std.mem.Allocator;
 
 pub const Config = struct {
+    bluetooth: connect.Options = .{},
     auth_key_file: ?[]const u8 = null,
     notification_wake_screen: ?bool = null,
     device: struct {
@@ -56,6 +58,7 @@ pub fn parse(a: A, source: []const u8, path: ?[]const u8) !Config {
         return err;
     };
     try bluez.validateAddress(config.device.address);
+    try config.bluetooth.validate();
     return config;
 }
 
@@ -120,4 +123,17 @@ test "screen wake configuration preserves an explicit false" {
     try std.testing.expectEqual(@as(?bool, false), disabled.notification_wake_screen);
     const enabled = try parse(a, ".{ .device = .{ .address = \"AA:BB:CC:DD:EE:FF\" }, .notification_wake_screen = true }", null);
     try std.testing.expectEqual(@as(?bool, true), enabled.notification_wake_screen);
+}
+
+test "Bluetooth setup options load overrides and reject invalid limits" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const saved = try parse(a, ".{ .device = .{ .address = \"AA:BB:CC:DD:EE:FF\" }, .bluetooth = .{ .search_timeout_seconds = 120, .connect_timeout_seconds = 45, .connect_attempts = 2 } }", null);
+    try std.testing.expectEqual(@as(u16, 120), saved.bluetooth.search_timeout_seconds);
+    try std.testing.expectEqual(@as(u16, 45), saved.bluetooth.connect_timeout_seconds);
+    try std.testing.expectEqual(@as(u16, 30), saved.bluetooth.service_timeout_seconds);
+    try std.testing.expectEqual(@as(u8, 2), saved.bluetooth.connect_attempts);
+    try std.testing.expectError(error.InvalidBluetoothOptions, parse(a, ".{ .device = .{ .address = \"AA:BB:CC:DD:EE:FF\" }, .bluetooth = .{ .connect_attempts = 0 } }", null));
+    try std.testing.expectError(error.InvalidBluetoothOptions, parse(a, ".{ .device = .{ .address = \"AA:BB:CC:DD:EE:FF\" }, .bluetooth = .{ .search_timeout_seconds = 601 } }", null));
 }

@@ -1,5 +1,6 @@
 const std = @import("std");
 const dbus = @import("dbus.zig");
+const connect = @import("connect.zig");
 const bluez = @import("bluez.zig");
 const config = @import("config.zig");
 const notification = @import("notification.zig");
@@ -7,36 +8,7 @@ const gatt_names = @import("gatt_names.zig");
 const zepp = @import("zepp.zig");
 const A = std.mem.Allocator;
 const Io = std.Io;
-const device_interface = "org.bluez.Device1";
-
-fn discover(a: A, io: Io, connection: *dbus.Connection, seconds: u8, address: ?[]const u8) ![]bluez.Node {
-    const before = try bluez.snapshot(a, connection);
-    var adapter: ?bluez.Node = null;
-    for (before) |node| {
-        if (node.adapter and node.powered) {
-            adapter = node;
-            break;
-        }
-    }
-    const path = (adapter orelse return error.NoPoweredBluetoothAdapter).path;
-    var filter_reply = try connection.call(path, "org.bluez.Adapter1", "SetDiscoveryFilter", .{
-        .dictionary_string = .{ .key = "Transport", .value = "le" },
-    });
-    filter_reply.deinit();
-    try connection.simple(path, "org.bluez.Adapter1", "StartDiscovery", 5_000_000);
-    defer connection.simple(path, "org.bluez.Adapter1", "StopDiscovery", 5_000_000) catch {};
-    const end = Io.Timestamp.now(io, .awake).addDuration(.fromSeconds(seconds));
-    while (true) {
-        const nodes = try bluez.snapshot(a, connection);
-        if (address) |target| {
-            if (bluez.findDevice(nodes, target) != null) return nodes;
-        }
-        const now = Io.Timestamp.now(io, .awake);
-        if (now.nanoseconds >= end.nanoseconds) return nodes;
-        const remaining = now.durationTo(end);
-        try io.sleep(.fromNanoseconds(@min(remaining.nanoseconds, 500 * std.time.ns_per_ms)), .awake);
-    }
-}
+const discover = connect.discover;
 
 fn readCharacteristic(a: A, io: Io, connection: *dbus.Connection, node: bluez.Node) ![]const u8 {
     if (!node.readable) return error.CharacteristicNotReadable;
@@ -81,6 +53,8 @@ fn help(out: *Io.Writer) !void {
         \\notify writes an alert; it does not pair, reset, unbind, or update firmware.
         \\notify authenticates using auth-key.hex beside the config, or auth_key_file.
         \\Optional notification_wake_screen sets and verifies the band's screen-wake preference.
+        \\Bluetooth setup defaults: search 60s, connect 30s, services 30s, up to 3 attempts.
+        \\Override these limits in the config's bluetooth section.
         \\
     );
 }
@@ -122,12 +96,14 @@ fn execute(init: std.process.Init) !void {
         seconds = std.fmt.parseInt(u8, command[1], 10) catch return error.InvalidScanDuration;
         if (seconds == 0 or seconds > 60) return error.InvalidScanDuration;
     }
+    var bluetooth: connect.Options = .{};
     var auth_key: ?[16]u8 = null;
     var wake_screen: ?bool = null;
     defer if (auth_key) |*key| std.crypto.secureZero(u8, key);
     const address = if (scan) "" else if (!notify and command.len == 2) command[1] else blk: {
         const path = config_path orelse try config.defaultPath(a, init.environ_map);
         const saved = try config.load(a, io, path);
+        bluetooth = saved.bluetooth;
         if (notify) auth_key = try config.loadAuthKey(a, io, path, saved);
         if (notify) wake_screen = saved.notification_wake_screen;
         break :blk saved.device.address;
@@ -148,34 +124,10 @@ fn execute(init: std.process.Init) !void {
         return;
     }
 
-    var nodes = try bluez.snapshot(a, &connection);
-    if (bluez.findDevice(nodes, address) == null) {
-        std.debug.print("Looking for {s} for up to 30 seconds...\n", .{address});
-        nodes = try discover(a, io, &connection, 30, address);
-    }
-    var device = bluez.findDevice(nodes, address) orelse {
-        std.debug.print("The configured band was not seen during discovery. Wake its screen and try again.\n", .{});
-        return error.DeviceNotFound;
-    };
-    const opened_here = !device.connected;
-    // Preserve an existing connection, and close connections opened by this tool.
-    defer if (opened_here) connection.simple(device.path, device_interface, "Disconnect", 5_000_000) catch {};
-    if (opened_here) {
-        std.debug.print("Connecting to {s}...\n", .{device.name orelse address});
-        try connection.simple(device.path, device_interface, "Connect", 15_000_000);
-    }
-    const end = Io.Timestamp.now(io, .awake).addDuration(.fromSeconds(15));
-    var observed_connected = false;
-    while (true) {
-        nodes = try bluez.snapshot(a, &connection);
-        device = bluez.findDevice(nodes, address) orelse return error.DeviceDisconnected;
-        if (device.connected) {
-            observed_connected = true;
-        } else if (observed_connected) return error.DeviceDisconnected;
-        if (device.connected and device.resolved) break;
-        if (Io.Timestamp.now(io, .awake).nanoseconds >= end.nanoseconds) return error.ServiceDiscoveryTimedOut;
-        try io.sleep(.fromMilliseconds(100), .awake);
-    }
+    const ready = try connect.open(a, io, &connection, address, bluetooth);
+    defer ready.close(&connection);
+    const nodes = ready.nodes;
+    const device = ready.device;
 
     if (notify) {
         _ = try readBattery(a, io, &connection, nodes, device);
@@ -258,5 +210,6 @@ test {
     _ = @import("notification.zig");
     _ = @import("zepp.zig");
     _ = @import("b163.zig");
+    _ = @import("connect.zig");
     _ = @import("gatt_names.zig");
 }

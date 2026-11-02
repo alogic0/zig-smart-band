@@ -1,4 +1,11 @@
 .{
+    .bluetooth = .{
+        .search_timeout_seconds = 60,
+        .connect_timeout_seconds = 30,
+        .service_timeout_seconds = 30,
+        .connect_attempts = 3,
+        .retry_delay_seconds = 2,
+    },
     .device = .{
         .name = "My Xiaomi Smart Band 7",
         .address = "AA:BB:CC:DD:EE:FF",
