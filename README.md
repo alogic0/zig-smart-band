@@ -105,9 +105,13 @@ Add a location to `~/.config/smart-band/config.zon`, using its coordinates:
 The preview fetches and prints current conditions and a seven-day forecast.
 The update uses the saved pairing key, verifies the band's temperature display
 unit as Celsius, and sends the configured location. The band then requests its
-weather data over Bluetooth; keep it nearby and open its Weather app if needed.
-The command waits up to 60 seconds for requests and reports which responses it
-supplied. Check the screen to confirm the weather was displayed.
+weather data over Bluetooth; keep it nearby, open its Weather app, and scroll
+to the daily forecast so it requests today's high and low temperatures.
+The command waits up to 60 seconds for requests, prints the supplied high/low,
+and reports which responses it supplied. Success requires both current weather
+and the daily forecast. A current-only update reports a partial result and exits
+with an error so scripts can detect missing high/low data. Check the screen to
+confirm the weather was displayed.
 
 Weather comes from [Open-Meteo](https://open-meteo.com/), with current conditions,
 seven daily forecasts, and up to 72 hours of hourly forecasts. The HTTPS fetch
@@ -323,8 +327,10 @@ The screen-wake setting was read back as enabled, and the user confirmed that
 a subsequent notification woke the display without touch or wrist movement.
 Weather was also tested with Germantown, Tennessee: Celsius was read back as
 the selected temperature unit, the band requested current conditions, and the
-user confirmed the updated weather appeared. Daily and hourly forecast response
-formats pass offline tests; the band did not request them in that live session.
+user confirmed the updated weather appeared. In a subsequent live test, opening
+Weather and scrolling to the daily forecast triggered daily and hourly forecast
+requests. The tool supplied both, and the user confirmed high and low
+temperatures appeared.
 Other models and firmware versions have not been tested.
 
 ## Protocol references

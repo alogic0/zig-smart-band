@@ -229,6 +229,7 @@ pub fn main(init: std.process.Init) void {
             error.InvalidBluetoothOptions => std.debug.print("Check the config's bluetooth section: search_timeout_seconds 1-600, connect_timeout_seconds and service_timeout_seconds 1-120, connect_attempts 1-255, retry_delay_seconds 0-10.\n", .{}),
             error.WeatherLocationUnavailable, error.InvalidWeatherConfiguration => std.debug.print("Set weather = .{{ .location = \"City\", .latitude = 0.0, .longitude = 0.0 }} in the device config, using your city's coordinates.\n", .{}),
             error.WeatherNotRequested => std.debug.print("The band did not request current weather. Open its Weather app while running the weather command again.\n", .{}),
+            error.WeatherForecastNotRequested => std.debug.print("Run weather again, open Weather on the band, and scroll to its daily forecast while the command is connected.\n", .{}),
             error.WeatherFetchTimedOut, error.WeatherProviderFailed => std.debug.print("Could not fetch weather from Open-Meteo; try weather --preview to check the data connection.\n", .{}),
             error.DeviceNotFound, error.DeviceDisconnected, error.DBusCallFailed => std.debug.print("Keep the band nearby and awake; temporarily disconnect the phone app, then run scan.\n", .{}),
             error.PairingKeyUnavailable, error.InvalidPairingKey => std.debug.print("Save the 32 hexadecimal pairing-key digits in auth-key.hex beside the config, or set auth_key_file.\n", .{}),

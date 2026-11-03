@@ -300,7 +300,7 @@ pub fn httpReply(a: A, id: u8, body: ?[]const u8) ![]u8 {
 pub fn update(a: A, io: Io, transport: anytype, data: Data, out: *Io.Writer) !void {
     const stamp = Io.Timestamp.now(io, .real).toMilliseconds();
     try transport.send(0xe, try data.locationPacket(a, stamp));
-    try out.writeAll("Weather location sent. Open Weather on the band if needed; waiting up to 60 seconds...\n");
+    try out.writeAll("Weather location sent. Open Weather on the band and scroll to the daily forecast to update high/low temperatures; waiting up to 60 seconds...\n");
     try out.flush();
     const end = Io.Timestamp.now(io, .awake).addDuration(.fromSeconds(60));
     var deadline = end;
@@ -314,10 +314,14 @@ pub fn update(a: A, io: Io, transport: anytype, data: Data, out: *Io.Writer) !vo
             return err;
         };
         if (message.endpoint != 1) continue;
-        const req = decodeRequest(a, message.data) catch {
+        const req = decodeRequest(a, message.data) catch |err| {
+            try out.print("Could not decode band weather request ({t}, {d} bytes).\n", .{ err, message.data.len });
+            try out.flush();
             if (message.data.len >= 2) try transport.send(1, try httpReply(a, message.data[1], null));
             continue;
         };
+        try out.print("Band requested {s}.\n", .{req.path});
+        try out.flush();
         const body = try data.body(a, req.path);
         try transport.send(1, try httpReply(a, req.id, body));
         if (body != null) {
@@ -326,11 +330,23 @@ pub fn update(a: A, io: Io, transport: anytype, data: Data, out: *Io.Writer) !vo
             try out.flush();
             current = current or std.mem.eql(u8, req.path, "/weather/current");
             forecast = forecast or std.mem.eql(u8, req.path, "/weather/v2/forecast");
+            if (std.mem.eql(u8, req.path, "/weather/v2/forecast")) {
+                try out.print("Today's forecast supplied: high {d:.0} °C, low {d:.0} °C.\n", .{ data.raw.daily.temperature_2m_max[0], data.raw.daily.temperature_2m_min[0] });
+                try out.flush();
+            }
+        } else {
+            try out.print("Weather route {s} is not supported.\n", .{req.path});
+            try out.flush();
         }
         if (current and forecast) deadline = .{ .nanoseconds = @min(end.nanoseconds, Io.Timestamp.now(io, .awake).addDuration(.fromSeconds(5)).nanoseconds) };
     }
     if (!current) return error.WeatherNotRequested;
-    try out.print("Weather supplied ({d} response{s}); check the band's display.\n", .{ replies, if (replies == 1) "" else "s" });
+    if (!forecast) {
+        try out.writeAll("Partial update: current weather supplied; daily high/low temperatures were not delivered.\n");
+        try out.flush();
+        return error.WeatherForecastNotRequested;
+    }
+    try out.print("Current weather and daily high/low supplied ({d} responses); check the band's display.\n", .{replies});
 }
 
 test "weather settings and WMO codes reject invalid values" {
@@ -380,6 +396,10 @@ test "weather response data owns strings, encodes Celsius and rejects misaligned
     try std.testing.expectEqualStrings("℃", temperature.get("unit").?.string);
     try std.testing.expectEqualStrings("-2", temperature.get("value").?.string);
     try std.testing.expectEqualStrings("14", model.get("weather").?.string);
+    const forecast = try std.json.parseFromSliceLeaky(std.json.Value, a, (try data.body(a, "/weather/v2/forecast")).?, .{});
+    const today = forecast.object.get("temperature").?.array.items[0].object;
+    try std.testing.expectEqualStrings("-5", today.get("from").?.string);
+    try std.testing.expectEqualStrings("2", today.get("to").?.string);
     for ([_][]const u8{ "/weather/v2/forecast", "/weather/forecast/hourly", "/weather/index" }) |path| {
         const body = (try data.body(a, path)).?;
         _ = try std.json.parseFromSliceLeaky(std.json.Value, a, body, .{});
@@ -401,6 +421,7 @@ test "weather update serves band requests locally and distinguishes an absent re
         index: usize = 0,
         sent: usize = 0,
         no_requests: bool = false,
+        current_only: bool = false,
         pub fn send(self: *@This(), endpoint: u16, bytes: []const u8) !void {
             if (self.sent == 0) {
                 try std.testing.expectEqual(@as(u16, 0xe), endpoint);
@@ -421,6 +442,7 @@ test "weather update serves band requests locally and distinguishes an absent re
         }
         pub fn next(self: *@This(), _: Io.Timestamp) !struct { endpoint: u16, data: []const u8 } {
             if (self.no_requests) return error.BandResponseTimedOut;
+            if (self.current_only and self.index == 1) return error.BandResponseTimedOut;
             const requests = [_][]const u8{
                 "\x01\x01GET\x00https://api-mifit.huami.com/weather/current\x00",
                 "\x01\x02GET\x00https://api-mifit.huami.com/weather/v2/forecast?days=10\x00",
@@ -441,6 +463,9 @@ test "weather update serves band requests locally and distinguishes an absent re
     var fake: Fake = .{};
     try update(a, std.testing.io, &fake, data, &output.writer);
     try std.testing.expectEqual(@as(usize, 5), fake.sent);
+    fake = .{ .current_only = true };
+    try std.testing.expectError(error.WeatherForecastNotRequested, update(a, std.testing.io, &fake, data, &output.writer));
+    try std.testing.expectEqual(@as(usize, 2), fake.sent);
     fake = .{ .no_requests = true };
     try std.testing.expectError(error.WeatherNotRequested, update(a, std.testing.io, &fake, data, &output.writer));
 }
