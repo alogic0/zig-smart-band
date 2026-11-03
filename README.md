@@ -94,6 +94,7 @@ Add a location to `~/.config/smart-band/config.zon`, using its coordinates:
     .location = "Germantown, TN",
     .latitude = 35.08676,
     .longitude = -89.81009,
+    .cache_ttl_seconds = 600,
 },
 ```
 
@@ -102,7 +103,20 @@ Add a location to `~/.config/smart-band/config.zon`, using its coordinates:
 ./zig-out/bin/smart-band weather
 ```
 
-The preview fetches and prints current conditions and a seven-day forecast.
+The preview loads and prints current conditions and a seven-day forecast.
+Weather data is loaded before Bluetooth setup. A successful download is saved
+immediately, so a failed connection to the band does not lose it. Quick retries
+and previews reuse the saved data for 600 seconds (10 minutes) by default.
+`cache_ttl_seconds` in the `weather` section changes that lifetime; set it to
+`0` to fetch on every invocation and disable cache reads and writes.
+
+Cache files live in `$XDG_CACHE_HOME/smart-band/`, or
+`~/.cache/smart-band/` when `XDG_CACHE_HOME` is unset. Each location has its own
+cache. Expired, invalid, or future-dated entries trigger a fresh download, as
+does a new local calendar day so yesterday's high/low cannot be reused as today's.
+An expired cache is not used if the provider request fails. The command prints
+whether it is fetching weather or reusing a cache and how old the cached data is.
+
 The update uses the saved pairing key, verifies the band's temperature display
 unit as Celsius, and sends the configured location. The band then requests its
 weather data over Bluetooth; keep it nearby, open its Weather app, and scroll

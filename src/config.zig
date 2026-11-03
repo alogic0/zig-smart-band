@@ -145,7 +145,8 @@ test "weather configuration is optional and validates the configured coordinates
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const saved = try parse(a, ".{ .device = .{ .address = \"AA:BB:CC:DD:EE:FF\" }, .weather = .{ .location = \"Germantown, TN\", .latitude = 35.08676, .longitude = -89.81009 } }", null);
+    const saved = try parse(a, ".{ .device = .{ .address = \"AA:BB:CC:DD:EE:FF\" }, .weather = .{ .location = \"Germantown, TN\", .latitude = 35.08676, .longitude = -89.81009, .cache_ttl_seconds = 1200 } }", null);
     try std.testing.expectEqualStrings("Germantown, TN", saved.weather.?.location);
+    try std.testing.expectEqual(@as(u32, 1200), saved.weather.?.cache_ttl_seconds);
     try std.testing.expectError(error.InvalidWeatherConfiguration, parse(a, ".{ .device = .{ .address = \"AA:BB:CC:DD:EE:FF\" }, .weather = .{ .location = \"Test\", .latitude = 91.0, .longitude = 0.0 } }", null));
 }

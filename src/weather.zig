@@ -7,6 +7,7 @@ pub const Settings = struct {
     location: []const u8,
     latitude: f64,
     longitude: f64,
+    cache_ttl_seconds: u32 = 600,
     pub fn validate(self: Settings) !void {
         if (self.location.len == 0 or self.location.len > 80 or !std.unicode.utf8ValidateSlice(self.location) or
             std.mem.indexOfScalar(u8, self.location, 0) != null or
@@ -210,8 +211,12 @@ fn conditionName(wmo: u8) []const u8 {
 }
 
 pub fn parse(a: A, settings: Settings, source: []const u8) !Data {
-    try settings.validate();
     const r = try std.json.parseFromSliceLeaky(Raw, a, source, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+    return fromRaw(a, settings, r);
+}
+
+pub fn fromRaw(a: A, settings: Settings, r: Raw) !Data {
+    try settings.validate();
     // All parallel lists must be aligned before any indexed access.
     inline for (.{ "daily", "hourly" }) |group| {
         const fields = @field(r, group);
@@ -374,12 +379,7 @@ test "band HTTP requests and replies preserve IDs and UTF-8 byte lengths" {
     try std.testing.expectEqualStrings("2026-11-02T12:30:00-0600", try dateTime(a, "2026-11-02T12:30", -21600));
 }
 
-const sample =
-    \\{"utc_offset_seconds":-21600,
-    \\"current":{"time":"2026-11-02T12:30","temperature_2m":-2.4,"relative_humidity_2m":70,"weather_code":71,"surface_pressure":1010,"wind_speed_10m":6,"wind_direction_10m":180},
-    \\"daily":{"time":["2026-11-02"],"temperature_2m_min":[-5],"temperature_2m_max":[2],"weather_code":[71],"sunrise":["2026-11-02T06:30"],"sunset":["2026-11-02T17:00"],"wind_speed_10m_max":[12],"wind_direction_10m_dominant":[180],"uv_index_max":[2]},
-    \\"hourly":{"time":["2026-11-02T12:00"],"temperature_2m":[-2],"relative_humidity_2m":[70],"weather_code":[71],"wind_speed_10m":[6],"wind_direction_10m":[180],"visibility":[10000],"uv_index":[1]}}
-;
+const sample = @embedFile("testdata/weather.json");
 const test_settings: Settings = .{ .location = "Germantown, TN", .latitude = 35.08676, .longitude = -89.81009 };
 
 test "weather response data owns strings, encodes Celsius and rejects misaligned provider lists" {

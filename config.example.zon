@@ -1,5 +1,6 @@
 .{
     // Set a location to enable weather; temperatures are sent in Celsius.
+    // weather.cache_ttl_seconds defaults to 600; set 0 to disable caching.
     .weather = null,
     .bluetooth = .{
         .search_timeout_seconds = 60,

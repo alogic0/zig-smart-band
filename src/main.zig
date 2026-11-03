@@ -8,6 +8,7 @@ const gatt_names = @import("gatt_names.zig");
 const zepp = @import("zepp.zig");
 const alarms = @import("alarms.zig");
 const weather = @import("weather.zig");
+const weather_cache = @import("weather_cache.zig");
 const A = std.mem.Allocator;
 const Io = std.Io;
 const discover = connect.discover;
@@ -130,7 +131,7 @@ fn execute(init: std.process.Init) !void {
         break :blk saved.device.address;
     };
     if (!scan) try bluez.validateAddress(address);
-    const weather_data: ?weather.Data = if (weather_command) try weather.fetch(a, io, weather_settings.?) else null;
+    const weather_data: ?weather.Data = if (weather_command) try weather_cache.get(a, io, init.environ_map, weather_settings.?, out) else null;
     if (weather_data) |data| {
         try data.preview(out);
         try out.flush();
@@ -259,4 +260,5 @@ test {
     _ = @import("band_time.zig");
     _ = @import("alarms.zig");
     _ = @import("weather.zig");
+    _ = @import("weather_cache.zig");
 }
