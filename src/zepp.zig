@@ -1,11 +1,12 @@
-//! Huami 2021 framing and authenticated Zepp OS notifications.
-//! Wire-format reference: Gadgetbridge Huami2021 and ZeppOsNotificationService.
+//! Huami 2021 framing and authenticated Zepp OS commands.
+//! Wire-format reference: Gadgetbridge Huami2021 and Zepp OS services.
 const std = @import("std");
 const dbus = @import("dbus.zig");
 const bluez = @import("bluez.zig");
 const b163 = @import("b163.zig");
 const notification = @import("notification.zig");
 const band_time = @import("band_time.zig");
+const alarms = @import("alarms.zig");
 const Aes = std.crypto.core.aes.Aes128;
 const Crc = std.hash.Crc32;
 const Io = std.Io;
@@ -152,6 +153,10 @@ const Session = struct {
         }
     }
     fn receive(self: *Session, endpoint: u16) ![]const u8 {
+        return self.receiveMatching(endpoint, null);
+    }
+
+    fn receiveMatching(self: *Session, endpoint: u16, command: ?u8) ![]const u8 {
         const deadline = Io.Timestamp.now(self.io, .awake).addDuration(.fromSeconds(20));
         while (true) {
             const packet = try self.receiver.next(self.io, deadline);
@@ -160,7 +165,7 @@ const Session = struct {
                 try write(self.connection, self.reader, &.{ 4, 0, packet[3], 1, packet[4] });
             }
             if (message) |value| {
-                if (value.endpoint == endpoint) return value.data;
+                if (value.endpoint == endpoint and (command == null or value.data[0] == command.?)) return value.data;
             }
         }
     }
@@ -169,6 +174,22 @@ const Session = struct {
 const Action = union(enum) {
     notification: struct { text: []const u8, wake_screen: ?bool },
     sync_time: *Io.Writer,
+    alarm: struct { command: alarms.Command, out: *Io.Writer },
+};
+
+pub fn manageAlarms(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []const bluez.Node, device: bluez.Node, secret: [16]u8, command: alarms.Command, out: *Io.Writer) !void {
+    try run(a, io, connection, nodes, device, secret, .{ .alarm = .{ .command = command, .out = out } });
+}
+
+const AlarmTransport = struct {
+    session: *Session,
+    encrypted: bool,
+    pub fn send(self: *AlarmTransport, bytes: []const u8) !void {
+        try self.session.send(0xf, bytes, self.encrypted);
+    }
+    pub fn receive(self: *AlarmTransport, command: u8) ![]const u8 {
+        return self.session.receiveMatching(0xf, command);
+    }
 };
 
 pub fn notify(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []const bluez.Node, device: bluez.Node, secret: [16]u8, text: []const u8, wake_screen: ?bool) !void {
@@ -212,15 +233,18 @@ fn run(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []cons
     Aes.initEnc(key).encrypt(response[17..33], challenge[3..19]);
     try session.send(0x82, &response, false);
     const accepted = try session.receive(0x82);
-    if (!std.mem.eql(u8, accepted, "\x10\x05\x01")) return error.BandAuthenticationFailed;
+    if (!std.mem.eql(u8, accepted, "\x10\x05\x01")) {
+        if (accepted.len >= 3) std.debug.print("Band authentication response: command {x}, status {x}, length {d}.\n", .{ accepted[1], accepted[2], accepted.len });
+        return error.BandAuthenticationFailed;
+    }
     std.debug.print("Band authentication succeeded.\n", .{});
-    const alert = switch (action) {
+    switch (action) {
         .sync_time => |out| {
             try band_time.sync(a, io, connection, nodes, device, out);
             return;
         },
-        .notification => |value| value,
-    };
+        else => {},
+    }
     try session.send(0x15, &.{1}, false);
     const mtu_reply = try session.receive(0x15);
     if (mtu_reply.len != 3 or mtu_reply[0] != 2) return error.InvalidBluetoothMtu;
@@ -229,6 +253,15 @@ fn run(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []cons
     session.writer.mtu = att_payload + 3;
     try session.send(0, &.{3}, false);
     const services = try session.receive(0);
+    const alert = switch (action) {
+        .alarm => |value| {
+            var transport: AlarmTransport = .{ .session = &session, .encrypted = try serviceEncryption(services, 0xf) };
+            try alarms.execute(&transport, value.command, value.out);
+            return;
+        },
+        .notification => |value| value,
+        .sync_time => unreachable,
+    };
     const encrypted_notifications = try serviceEncryption(services, 0x1e);
     const encrypted_files = try serviceEncryption(services, 0x0d);
     if (alert.wake_screen) |enabled| {

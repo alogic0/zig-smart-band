@@ -81,6 +81,50 @@ Invalid notification text, key files, and configurations fail before Bluetooth a
   titled `PC`, with app name `Desktop`. Quote messages containing spaces.
 - `sync-time`: authenticate and set the configured band's clock to the computer's
   current local date, time, and UTC offset, then verify the clock by reading it back.
+- `alarm`: list, add, edit, enable, disable, or delete alarms on the configured band.
+
+## Alarm management
+
+```sh
+./zig-out/bin/smart-band alarm list
+./zig-out/bin/smart-band alarm add 07:30 weekdays
+./zig-out/bin/smart-band alarm add 09:00 once --disabled
+```
+
+Use an alarm's ID from `list` or the result of `add` in these commands
+(replace `ID` with that number):
+
+```sh
+./zig-out/bin/smart-band alarm set ID 08:00 mon,wed,fri
+./zig-out/bin/smart-band alarm disable ID
+./zig-out/bin/smart-band alarm enable ID
+./zig-out/bin/smart-band alarm delete ID
+```
+
+Alarm commands use the saved pairing key and the same connection-setup retries
+as notifications. Times must use 24-hour `HH:MM` and refer to the band's local
+clock. Use `sync-time` first if the clock needs correcting.
+
+`list` shows stable alarm IDs 1–10, enabled state, time, repetition, and existing
+smart-wake status. IDs identify slots rather than row numbers; gaps are normal.
+Always use an ID from the current list when editing or deleting an alarm.
+
+`add` chooses an unused slot and enables the new alarm unless `--disabled` is
+supplied. It fails when all ten slots are occupied. Repetition defaults to
+`once`; alternatives are `daily`, `weekdays`, `weekends`, or comma-separated
+day names (`mon,tue,wed,thu,fri,sat,sun`, case-insensitive).
+
+`set ID HH:MM [REPEAT]` changes an existing alarm's time. Omitting repetition
+preserves its existing schedule. It also preserves enabled state and smart-wake
+flags. `enable` and `disable` change only the enabled flag. New alarms use ordinary
+wake behavior; existing smart-wake settings are preserved.
+
+Every change reads the latest list, writes only the target slot, and reads the
+list back to verify both the requested change and preservation of other alarms.
+Firmware-specific repeat flags are retained when the schedule is unchanged;
+weekday-mask normalization is allowed when checking an explicit schedule change.
+An alarm write is never automatically repeated after a timeout or uncertain
+result. Run `alarm list` to inspect the actual state before retrying a change.
 
 ## Clock synchronization
 
@@ -198,12 +242,14 @@ These are per-attempt, per-phase limits, rather than a whole-command deadline.
 Other D-Bus calls normally time out after five seconds; application writes allow
 fifteen seconds, and protocol responses twenty. Cleanup may take another five
 seconds. Read-only requests retry once after a transport failure; notification
-writes are not replayed. An initial battery read lets a fresh link settle.
+writes are not replayed. Notifications and clock synchronization use an initial
+battery read to let a fresh link settle; alarm commands authenticate directly.
 
 Battery/info commands still use ordinary readable GATT services. Authentication
-is performed for notifications and clock synchronization. The tool does not pair,
+is performed for notifications, clock synchronization, and alarms. The tool does not pair,
 unbind, reset, or update firmware. It changes the clock only with `sync-time`
-and the screen-wake preference only when explicitly configured. NFC payments, history, and health data
+and alarms only through explicit alarm commands, and the screen-wake preference
+only when explicitly configured. NFC payments, history, and health data
 are outside this version.
 
 ## Validation
@@ -214,8 +260,9 @@ zig build check test -Doptimize=safe --summary all
 ```
 
 Offline tests cover battery/address/config parsing, key exchange and peer
-validation, notification encoding, chunk validation, encrypted checksums, and
-replay rejection. They do not connect over Bluetooth. OpenSSL 3 is needed for
+validation, notification encoding, chunk validation, encrypted checksums,
+replay rejection, and alarm parsing, slot allocation, and verified updates.
+They do not connect over Bluetooth. OpenSSL 3 is needed for
 the key-exchange test.
 
 On 2026-11-02 the tool read battery 42%, hardware `0.91.17.21`, and software
@@ -227,6 +274,8 @@ the user confirmed that the notification appeared on the band. A second
 notification over a fresh connection also appeared, using the cached icon.
 Clock synchronization was also tested: the band accepted the computer's local
 time and UTC offset, and its Current Time read-back matched the system clock.
+Alarm management passed a live create/edit/enable/disable/delete cycle in an
+unused slot, with every change read back and the original three alarms preserved.
 The screen-wake setting was read back as enabled, and the user confirmed that
 a subsequent notification woke the display without touch or wrist movement.
 Other models and firmware versions have not been tested.

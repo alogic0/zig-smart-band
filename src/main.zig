@@ -6,6 +6,7 @@ const config = @import("config.zig");
 const notification = @import("notification.zig");
 const gatt_names = @import("gatt_names.zig");
 const zepp = @import("zepp.zig");
+const alarms = @import("alarms.zig");
 const A = std.mem.Allocator;
 const Io = std.Io;
 const discover = connect.discover;
@@ -45,6 +46,12 @@ fn help(out: *Io.Writer) !void {
         \\  smart-band inspect [ADDRESS]  List the device's GATT services and characteristics
         \\  smart-band notify MESSAGE     Send a text alert to the configured band
         \\  smart-band sync-time          Sync the band to the computer's local time
+        \\  smart-band alarm list
+        \\  smart-band alarm add HH:MM [REPEAT] [--disabled]
+        \\  smart-band alarm set ID HH:MM [REPEAT]
+        \\  smart-band alarm enable|disable|delete ID
+        \\    REPEAT: once (default), daily, weekdays, weekends, or mon,wed,fri
+        \\    IDs are 1-10, as printed by alarm list; times use the band's local clock.
         \\  smart-band --help
         \\
         \\The default device is read from $XDG_CONFIG_HOME/smart-band/config.zon
@@ -88,8 +95,10 @@ fn execute(init: std.process.Init) !void {
     const inspect = std.mem.eql(u8, command[0], "inspect");
     const notify = std.mem.eql(u8, command[0], "notify");
     const sync_time = std.mem.eql(u8, command[0], "sync-time");
-    if (!scan and !info and !battery and !inspect and !notify and !sync_time) return error.UnknownCommand;
-    if (command.len > 2) return error.InvalidArguments;
+    const alarm = std.mem.eql(u8, command[0], "alarm");
+    if (!scan and !info and !battery and !inspect and !notify and !sync_time and !alarm) return error.UnknownCommand;
+    if (!alarm and command.len > 2) return error.InvalidArguments;
+    const alarm_request: ?alarms.Command = if (alarm) try alarms.parse(command[1..]) else null;
     if (sync_time and command.len != 1) return error.InvalidArguments;
     if (notify) {
         if (command.len != 2) return error.InvalidArguments;
@@ -104,11 +113,11 @@ fn execute(init: std.process.Init) !void {
     var auth_key: ?[16]u8 = null;
     var wake_screen: ?bool = null;
     defer if (auth_key) |*key| std.crypto.secureZero(u8, key);
-    const address = if (scan) "" else if (!notify and !sync_time and command.len == 2) command[1] else blk: {
+    const address = if (scan) "" else if (!notify and !sync_time and !alarm and command.len == 2) command[1] else blk: {
         const path = config_path orelse try config.defaultPath(a, init.environ_map);
         const saved = try config.load(a, io, path);
         bluetooth = saved.bluetooth;
-        if (notify or sync_time) auth_key = try config.loadAuthKey(a, io, path, saved);
+        if (notify or sync_time or alarm) auth_key = try config.loadAuthKey(a, io, path, saved);
         if (notify) wake_screen = saved.notification_wake_screen;
         break :blk saved.device.address;
     };
@@ -133,7 +142,9 @@ fn execute(init: std.process.Init) !void {
     const nodes = ready.nodes;
     const device = ready.device;
 
-    if (sync_time) {
+    if (alarm) {
+        try zepp.manageAlarms(a, io, &connection, nodes, device, auth_key.?, alarm_request.?, out);
+    } else if (sync_time) {
         _ = try readBattery(a, io, &connection, nodes, device);
         try zepp.syncTime(a, io, &connection, nodes, device, auth_key.?, out);
     } else if (notify) {
@@ -205,6 +216,9 @@ pub fn main(init: std.process.Init) void {
             error.EmptyNotification => std.debug.print("Supply nonempty text, for example: smart-band notify \"Build finished\"\n", .{}),
             error.InvalidNotificationText => std.debug.print("Notification text must be valid UTF-8 without NUL bytes.\n", .{}),
             error.NotificationTooLong => std.debug.print("Notification text exceeds the {d}-byte maximum.\n", .{notification.max_message_bytes}),
+            error.InvalidAlarmArguments, error.InvalidAlarmId, error.InvalidAlarmTime, error.InvalidAlarmRepeat => std.debug.print("Use alarm list, alarm add HH:MM [REPEAT] [--disabled], alarm set ID HH:MM [REPEAT], or alarm enable|disable|delete ID. IDs: 1-10; repeat: once, daily, weekdays, weekends, or mon,wed,fri.\n", .{}),
+            error.AlarmNotFound => std.debug.print("No alarm at that ID. Run alarm list for current IDs.\n", .{}),
+            error.AlarmSlotsFull => std.debug.print("All ten alarm slots are occupied. Delete an alarm explicitly before adding one.\n", .{}),
             else => {},
         }
         std.process.exit(1);
@@ -220,4 +234,5 @@ test {
     _ = @import("connect.zig");
     _ = @import("gatt_names.zig");
     _ = @import("band_time.zig");
+    _ = @import("alarms.zig");
 }
