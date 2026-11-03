@@ -1,4 +1,6 @@
 .{
+    // Set a location to enable weather; temperatures are sent in Celsius.
+    .weather = null,
     .bluetooth = .{
         .search_timeout_seconds = 60,
         .connect_timeout_seconds = 30,

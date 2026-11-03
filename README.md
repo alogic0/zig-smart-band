@@ -82,6 +82,45 @@ Invalid notification text, key files, and configurations fail before Bluetooth a
 - `sync-time`: authenticate and set the configured band's clock to the computer's
   current local date, time, and UTC offset, then verify the clock by reading it back.
 - `alarm`: list, add, edit, enable, disable, or delete alarms on the configured band.
+- `weather`: fetch weather for the configured location and answer the band's
+  authenticated weather requests. `weather --preview` prints the forecast.
+
+## Weather
+
+Add a location to `~/.config/smart-band/config.zon`, using its coordinates:
+
+```zig
+.weather = .{
+    .location = "Germantown, TN",
+    .latitude = 35.08676,
+    .longitude = -89.81009,
+},
+```
+
+```sh
+./zig-out/bin/smart-band weather --preview
+./zig-out/bin/smart-band weather
+```
+
+The preview fetches and prints current conditions and a seven-day forecast.
+The update uses the saved pairing key, verifies the band's temperature display
+unit as Celsius, and sends the configured location. The band then requests its
+weather data over Bluetooth; keep it nearby and open its Weather app if needed.
+The command waits up to 60 seconds for requests and reports which responses it
+supplied. Check the screen to confirm the weather was displayed.
+
+Weather comes from [Open-Meteo](https://open-meteo.com/), with current conditions,
+seven daily forecasts, and up to 72 hours of hourly forecasts. The HTTPS fetch
+uses native Zig, has a 30-second deadline and a 128 KiB response limit, and
+requires no API key for personal, noncommercial use. Coordinates are sent to
+Open-Meteo. Weather data is provided under
+[CC BY 4.0](https://open-meteo.com/en/licence), and its condition codes are
+converted to the band's weather icons. Air quality, weather alerts, tides, and
+moon data are not supplied.
+
+Each invocation performs one update. Run it again to refresh the band's cached
+weather. It does not install a background updater. Existing configs work with
+the optional `weather` section absent or set to `null`.
 
 ## Alarm management
 
@@ -244,12 +283,14 @@ Other D-Bus calls normally time out after five seconds; application writes allow
 fifteen seconds, and protocol responses twenty. Cleanup may take another five
 seconds. Read-only requests retry once after a transport failure; notification
 writes are not replayed. Notifications and clock synchronization use an initial
-battery read to let a fresh link settle; alarm commands authenticate directly.
+battery read to let a fresh link settle; weather uses a best-effort battery read,
+and alarm commands authenticate directly.
 
 Battery/info commands still use ordinary readable GATT services. Authentication
-is performed for notifications, clock synchronization, and alarms. The tool does not pair,
+is performed for notifications, clock synchronization, alarms, and weather. The tool does not pair,
 unbind, reset, or update firmware. It changes the clock only with `sync-time`
-and alarms only through explicit alarm commands, and the screen-wake preference
+and alarms only through explicit alarm commands, and the temperature display unit
+and weather location through `weather`. It changes the screen-wake preference
 only when explicitly configured. NFC payments, history, and health data
 are outside this version.
 
@@ -262,7 +303,8 @@ zig build check test -Doptimize=safe --summary all
 
 Offline tests cover battery/address/config parsing, key exchange and peer
 validation, notification encoding, chunk validation, encrypted checksums,
-replay rejection, and alarm parsing, slot allocation, and verified updates.
+replay rejection, alarm parsing, slot allocation, and verified updates, and
+weather parsing, condition mapping, response encoding, and request handling.
 They do not connect over Bluetooth. OpenSSL 3 is needed for
 the key-exchange test.
 
@@ -279,6 +321,10 @@ Alarm management passed a live create/edit/enable/disable/delete cycle in an
 unused slot, with every change read back and the original three alarms preserved.
 The screen-wake setting was read back as enabled, and the user confirmed that
 a subsequent notification woke the display without touch or wrist movement.
+Weather was also tested with Germantown, Tennessee: Celsius was read back as
+the selected temperature unit, the band requested current conditions, and the
+user confirmed the updated weather appeared. Daily and hourly forecast response
+formats pass offline tests; the band did not request them in that live session.
 Other models and firmware versions have not been tested.
 
 ## Protocol references
@@ -287,6 +333,8 @@ Other models and firmware versions have not been tested.
 - [BlueZ GATT API](https://bluez.readthedocs.io/en/latest/gatt-api/)
 - [systemd sd-bus API](https://www.freedesktop.org/software/systemd/man/latest/sd-bus.html)
 - [Gadgetbridge Huami protocol implementation](https://github.com/Freeyourgadget/Gadgetbridge/tree/master/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/huami)
+- [Gadgetbridge Zepp OS weather format](https://github.com/Freeyourgadget/Gadgetbridge/blob/master/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/huami/zeppos/ZeppOsWeather.java)
+- [Open-Meteo forecast API](https://open-meteo.com/en/docs)
 
 The implementation is original Zig code. Gadgetbridge sources were consulted
 for wire-format facts; their Java implementations are not included.

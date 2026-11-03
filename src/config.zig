@@ -1,12 +1,14 @@
 const std = @import("std");
 const bluez = @import("bluez.zig");
 const connect = @import("connect.zig");
+const weather = @import("weather.zig");
 const A = std.mem.Allocator;
 
 pub const Config = struct {
     bluetooth: connect.Options = .{},
     auth_key_file: ?[]const u8 = null,
     notification_wake_screen: ?bool = null,
+    weather: ?weather.Settings = null,
     device: struct {
         address: []const u8,
         name: ?[]const u8 = null,
@@ -59,6 +61,7 @@ pub fn parse(a: A, source: []const u8, path: ?[]const u8) !Config {
     };
     try bluez.validateAddress(config.device.address);
     try config.bluetooth.validate();
+    if (config.weather) |settings| try settings.validate();
     return config;
 }
 
@@ -136,4 +139,13 @@ test "Bluetooth setup options load overrides and reject invalid limits" {
     try std.testing.expectEqual(@as(u8, 10), saved.bluetooth.connect_attempts);
     try std.testing.expectError(error.InvalidBluetoothOptions, parse(a, ".{ .device = .{ .address = \"AA:BB:CC:DD:EE:FF\" }, .bluetooth = .{ .connect_attempts = 0 } }", null));
     try std.testing.expectError(error.InvalidBluetoothOptions, parse(a, ".{ .device = .{ .address = \"AA:BB:CC:DD:EE:FF\" }, .bluetooth = .{ .search_timeout_seconds = 601 } }", null));
+}
+
+test "weather configuration is optional and validates the configured coordinates" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const saved = try parse(a, ".{ .device = .{ .address = \"AA:BB:CC:DD:EE:FF\" }, .weather = .{ .location = \"Germantown, TN\", .latitude = 35.08676, .longitude = -89.81009 } }", null);
+    try std.testing.expectEqualStrings("Germantown, TN", saved.weather.?.location);
+    try std.testing.expectError(error.InvalidWeatherConfiguration, parse(a, ".{ .device = .{ .address = \"AA:BB:CC:DD:EE:FF\" }, .weather = .{ .location = \"Test\", .latitude = 91.0, .longitude = 0.0 } }", null));
 }

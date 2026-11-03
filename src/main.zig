@@ -7,6 +7,7 @@ const notification = @import("notification.zig");
 const gatt_names = @import("gatt_names.zig");
 const zepp = @import("zepp.zig");
 const alarms = @import("alarms.zig");
+const weather = @import("weather.zig");
 const A = std.mem.Allocator;
 const Io = std.Io;
 const discover = connect.discover;
@@ -37,7 +38,7 @@ fn readBattery(a: A, io: Io, connection: *dbus.Connection, nodes: []const bluez.
 
 fn help(out: *Io.Writer) !void {
     try out.writeAll(
-        \\smart-band: read band information and send authenticated BLE notifications
+        \\smart-band: control a Xiaomi Smart Band over Bluetooth LE
         \\
         \\Usage:
         \\  smart-band scan [seconds]   Discover nearby devices (default 10, max 60)
@@ -46,6 +47,8 @@ fn help(out: *Io.Writer) !void {
         \\  smart-band inspect [ADDRESS]  List the device's GATT services and characteristics
         \\  smart-band notify MESSAGE     Send a text alert to the configured band
         \\  smart-band sync-time          Sync the band to the computer's local time
+        \\  smart-band weather            Update weather for the configured location (Celsius)
+        \\  smart-band weather --preview  Fetch and print weather without Bluetooth
         \\  smart-band alarm list
         \\  smart-band alarm add HH:MM [REPEAT] [--disabled]
         \\  smart-band alarm set ID HH:MM [REPEAT]
@@ -96,10 +99,13 @@ fn execute(init: std.process.Init) !void {
     const notify = std.mem.eql(u8, command[0], "notify");
     const sync_time = std.mem.eql(u8, command[0], "sync-time");
     const alarm = std.mem.eql(u8, command[0], "alarm");
-    if (!scan and !info and !battery and !inspect and !notify and !sync_time and !alarm) return error.UnknownCommand;
+    const weather_command = std.mem.eql(u8, command[0], "weather");
+    if (!scan and !info and !battery and !inspect and !notify and !sync_time and !alarm and !weather_command) return error.UnknownCommand;
     if (!alarm and command.len > 2) return error.InvalidArguments;
     const alarm_request: ?alarms.Command = if (alarm) try alarms.parse(command[1..]) else null;
     if (sync_time and command.len != 1) return error.InvalidArguments;
+    const weather_preview = weather_command and command.len == 2 and std.mem.eql(u8, command[1], "--preview");
+    if (weather_command and command.len != 1 and !weather_preview) return error.InvalidArguments;
     if (notify) {
         if (command.len != 2) return error.InvalidArguments;
         try notification.validate(command[1]);
@@ -112,16 +118,24 @@ fn execute(init: std.process.Init) !void {
     var bluetooth: connect.Options = .{};
     var auth_key: ?[16]u8 = null;
     var wake_screen: ?bool = null;
+    var weather_settings: ?weather.Settings = null;
     defer if (auth_key) |*key| std.crypto.secureZero(u8, key);
-    const address = if (scan) "" else if (!notify and !sync_time and !alarm and command.len == 2) command[1] else blk: {
+    const address = if (scan) "" else if (!notify and !sync_time and !alarm and !weather_command and command.len == 2) command[1] else blk: {
         const path = config_path orelse try config.defaultPath(a, init.environ_map);
         const saved = try config.load(a, io, path);
         bluetooth = saved.bluetooth;
-        if (notify or sync_time or alarm) auth_key = try config.loadAuthKey(a, io, path, saved);
+        if (notify or sync_time or alarm or (weather_command and !weather_preview)) auth_key = try config.loadAuthKey(a, io, path, saved);
         if (notify) wake_screen = saved.notification_wake_screen;
+        if (weather_command) weather_settings = saved.weather orelse return error.WeatherLocationUnavailable;
         break :blk saved.device.address;
     };
     if (!scan) try bluez.validateAddress(address);
+    const weather_data: ?weather.Data = if (weather_command) try weather.fetch(a, io, weather_settings.?) else null;
+    if (weather_data) |data| {
+        try data.preview(out);
+        try out.flush();
+        if (weather_preview) return;
+    }
     var connection = try dbus.Connection.init();
     defer connection.deinit();
 
@@ -142,7 +156,11 @@ fn execute(init: std.process.Init) !void {
     const nodes = ready.nodes;
     const device = ready.device;
 
-    if (alarm) {
+    if (weather_data) |data| {
+        // Let initial GATT traffic settle, without requiring battery access.
+        _ = readBattery(a, io, &connection, nodes, device) catch {};
+        try zepp.updateWeather(a, io, &connection, nodes, device, auth_key.?, data, out);
+    } else if (alarm) {
         try zepp.manageAlarms(a, io, &connection, nodes, device, auth_key.?, alarm_request.?, out);
     } else if (sync_time) {
         _ = try readBattery(a, io, &connection, nodes, device);
@@ -209,6 +227,9 @@ pub fn main(init: std.process.Init) void {
         std.debug.print("smart-band: {t}\n", .{err});
         switch (err) {
             error.InvalidBluetoothOptions => std.debug.print("Check the config's bluetooth section: search_timeout_seconds 1-600, connect_timeout_seconds and service_timeout_seconds 1-120, connect_attempts 1-255, retry_delay_seconds 0-10.\n", .{}),
+            error.WeatherLocationUnavailable, error.InvalidWeatherConfiguration => std.debug.print("Set weather = .{{ .location = \"City\", .latitude = 0.0, .longitude = 0.0 }} in the device config, using your city's coordinates.\n", .{}),
+            error.WeatherNotRequested => std.debug.print("The band did not request current weather. Open its Weather app while running the weather command again.\n", .{}),
+            error.WeatherFetchTimedOut, error.WeatherProviderFailed => std.debug.print("Could not fetch weather from Open-Meteo; try weather --preview to check the data connection.\n", .{}),
             error.DeviceNotFound, error.DeviceDisconnected, error.DBusCallFailed => std.debug.print("Keep the band nearby and awake; temporarily disconnect the phone app, then run scan.\n", .{}),
             error.PairingKeyUnavailable, error.InvalidPairingKey => std.debug.print("Save the 32 hexadecimal pairing-key digits in auth-key.hex beside the config, or set auth_key_file.\n", .{}),
             error.AuthenticationRequired => std.debug.print("The band requires authentication. No pairing keys or settings were changed.\n", .{}),
@@ -236,4 +257,5 @@ test {
     _ = @import("gatt_names.zig");
     _ = @import("band_time.zig");
     _ = @import("alarms.zig");
+    _ = @import("weather.zig");
 }

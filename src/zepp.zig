@@ -7,6 +7,7 @@ const b163 = @import("b163.zig");
 const notification = @import("notification.zig");
 const band_time = @import("band_time.zig");
 const alarms = @import("alarms.zig");
+const weather = @import("weather.zig");
 const Aes = std.crypto.core.aes.Aes128;
 const Crc = std.hash.Crc32;
 const Io = std.Io;
@@ -159,14 +160,19 @@ const Session = struct {
     fn receiveMatching(self: *Session, endpoint: u16, command: ?u8) ![]const u8 {
         const deadline = Io.Timestamp.now(self.io, .awake).addDuration(.fromSeconds(20));
         while (true) {
+            const value = try self.next(deadline);
+            if (value.endpoint == endpoint and (command == null or value.data[0] == command.?)) return value.data;
+        }
+    }
+
+    fn next(self: *Session, deadline: Io.Timestamp) !Message {
+        while (true) {
             const packet = try self.receiver.next(self.io, deadline);
             const message = try self.decoder.push(packet, self.key);
             if (packet.len >= 5 and packet[0] == 3 and packet[1] & 4 != 0) {
                 try write(self.connection, self.reader, &.{ 4, 0, packet[3], 1, packet[4] });
             }
-            if (message) |value| {
-                if (value.endpoint == endpoint and (command == null or value.data[0] == command.?)) return value.data;
-            }
+            if (message) |value| return value;
         }
     }
 };
@@ -175,6 +181,22 @@ const Action = union(enum) {
     notification: struct { text: []const u8, wake_screen: ?bool },
     sync_time: *Io.Writer,
     alarm: struct { command: alarms.Command, out: *Io.Writer },
+    weather: struct { data: weather.Data, out: *Io.Writer },
+};
+
+pub fn updateWeather(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []const bluez.Node, device: bluez.Node, secret: [16]u8, data: weather.Data, out: *Io.Writer) !void {
+    try run(a, io, connection, nodes, device, secret, .{ .weather = .{ .data = data, .out = out } });
+}
+
+const WeatherTransport = struct {
+    session: *Session,
+    encrypted_http: bool,
+    pub fn send(self: *@This(), endpoint: u16, bytes: []const u8) !void {
+        try self.session.send(endpoint, bytes, if (endpoint == 1) self.encrypted_http else false);
+    }
+    pub fn next(self: *@This(), deadline: Io.Timestamp) !Message {
+        return self.session.next(deadline);
+    }
 };
 
 pub fn manageAlarms(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []const bluez.Node, device: bluez.Node, secret: [16]u8, command: alarms.Command, out: *Io.Writer) !void {
@@ -254,6 +276,16 @@ fn run(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []cons
     try session.send(0, &.{3}, false);
     const services = try session.receive(0);
     const alert = switch (action) {
+        .weather => |value| {
+            // Replies share the decoder buffer; consume the service list before more reads.
+            const encrypted_http = try serviceEncryption(services, 1);
+            const encrypted_config = try serviceEncryption(services, 0xa);
+            // The wire format carries Celsius; set only the temperature display unit.
+            try setCelsius(&session, encrypted_config);
+            var transport: WeatherTransport = .{ .session = &session, .encrypted_http = encrypted_http };
+            try weather.update(a, io, &transport, value.data, value.out);
+            return;
+        },
         .alarm => |value| {
             var transport: AlarmTransport = .{ .session = &session, .encrypted = try serviceEncryption(services, 0xf) };
             try alarms.execute(&transport, value.command, value.out);
@@ -485,6 +517,31 @@ test "service list boundaries and desktop icon format" {
 }
 
 // Config endpoint 0x000a: DISPLAY group 1, version 2, boolean argument 0x0c.
+fn temperatureUnit(data: []const u8) !u8 {
+    if (data.len != 9 or !std.mem.eql(u8, data[0..8], &.{ 4, 1, 0xa, 1, 0, 1, 0x12, 0x10 }) or data[8] > 1) return error.UnsupportedTemperatureSetting;
+    return data[8];
+}
+
+fn setCelsius(session: *Session, encrypted: bool) !void {
+    const request = [_]u8{ 3, 0, 0xa, 1, 0x12 };
+    try session.send(0xa, &request, encrypted);
+    const current = try temperatureUnit(try session.receiveMatching(0xa, 4));
+    if (current != 0) {
+        try session.send(0xa, &.{ 5, 0xa, 1, 0, 1, 0x12, 0x10, 0 }, encrypted);
+        const ack = try session.receiveMatching(0xa, 6);
+        if (ack.len < 2) return error.InvalidConfigurationAck;
+        try session.send(0xa, &request, encrypted);
+        if (try temperatureUnit(try session.receiveMatching(0xa, 4)) != 0) return error.TemperatureSettingNotApplied;
+    }
+    std.debug.print("Weather temperature unit: Celsius (verified).\n", .{});
+}
+
+test "temperature unit parser validates the requested system byte" {
+    try std.testing.expectEqual(@as(u8, 0), try temperatureUnit(&.{ 4, 1, 0xa, 1, 0, 1, 0x12, 0x10, 0 }));
+    try std.testing.expectEqual(@as(u8, 1), try temperatureUnit(&.{ 4, 1, 0xa, 1, 0, 1, 0x12, 0x10, 1 }));
+    try std.testing.expectError(error.UnsupportedTemperatureSetting, temperatureUnit(&.{ 4, 1, 0xa, 1, 0, 1, 0x12, 0x10, 2 }));
+}
+
 const wake_request = [_]u8{ 3, 0, 1, 1, 0x0c };
 
 fn parseNotificationWake(data: []const u8) !bool {
