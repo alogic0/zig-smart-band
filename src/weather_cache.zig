@@ -12,7 +12,21 @@ const Record = struct {
     longitude: f64,
     raw: Raw,
 };
-const Cached = struct { data: weather.Data, age_seconds: i64 };
+const Cached = struct { data: weather.Data, age_seconds: i64, legacy: bool = false };
+
+fn validDate(date: []const u8) bool {
+    if (date.len != 10 or date[4] != '-' or date[7] != '-') return false;
+    for (date, 0..) |c, i| {
+        if (i != 4 and i != 7 and !std.ascii.isDigit(c)) return false;
+    }
+    return true;
+}
+
+fn datedPath(a: A, base: []const u8, date: []const u8) ![]u8 {
+    if (!validDate(date)) return error.InvalidWeatherData;
+    const name = try std.fmt.allocPrint(a, "{s}-{s}.json", .{ std.fs.path.stem(base), date });
+    return std.fs.path.join(a, &.{ std.fs.path.dirname(base) orelse ".", name });
+}
 
 pub fn path(a: A, env: *const std.process.Environ.Map, settings: weather.Settings) ![]u8 {
     const identity = try std.fmt.allocPrint(a, "open-meteo-celsius-v1:{d:.5},{d:.5}", .{ settings.latitude, settings.longitude });
@@ -41,20 +55,51 @@ fn fresh(record: Record, settings: weather.Settings, now: i64) bool {
     return std.mem.eql(u8, record.raw.daily.time[0], date);
 }
 
-fn read(a: A, io: Io, dir: Io.Dir, file: []const u8, settings: weather.Settings, now: i64) !?Cached {
+fn readFile(a: A, io: Io, dir: Io.Dir, file: []const u8, settings: weather.Settings, now: i64) !?Cached {
     const source = try dir.readFileAlloc(io, file, a, .limited(128 * 1024));
     const record = try std.json.parseFromSliceLeaky(Record, a, source, .{ .allocate = .alloc_always });
     if (!fresh(record, settings, now)) return null;
     return .{ .data = try weather.fromRaw(a, settings, record.raw), .age_seconds = now - record.fetched_at };
 }
 
+fn read(a: A, io: Io, dir: Io.Dir, base: []const u8, settings: weather.Settings, now: i64) !?Cached {
+    // Use the date returned by the provider, which can differ from the computer's
+    // date. Inspect this location's dated files without fetching timezone data.
+    const directory = try dir.openDir(io, std.fs.path.dirname(base) orelse ".", .{ .iterate = true });
+    defer directory.close(io);
+    const name = std.fs.path.basename(base);
+    const stem = std.fs.path.stem(name);
+    var iterator = directory.iterate();
+    var latest: ?Cached = null;
+    while (try iterator.next(io)) |entry| {
+        const legacy = std.mem.eql(u8, entry.name, name);
+        if (!legacy) {
+            if (entry.name.len != stem.len + 16 or !std.mem.startsWith(u8, entry.name, stem) or
+                entry.name[stem.len] != '-' or !std.mem.endsWith(u8, entry.name, ".json") or
+                !validDate(entry.name[stem.len + 1 ..][0..10])) continue;
+        }
+        var candidate = (readFile(a, io, directory, entry.name, settings, now) catch |err| switch (err) {
+            error.OutOfMemory, error.Canceled => return err,
+            else => null,
+        }) orelse continue;
+        if (!legacy and !std.mem.eql(u8, entry.name[stem.len + 1 ..][0..10], candidate.data.raw.daily.time[0])) continue;
+        candidate.legacy = legacy;
+        if (latest == null or candidate.age_seconds < latest.?.age_seconds or
+            (candidate.age_seconds == latest.?.age_seconds and !legacy)) latest = candidate;
+    }
+    return latest;
+}
+
 fn save(a: A, io: Io, dir: Io.Dir, file: []const u8, data: weather.Data, now: i64) !void {
     const record: Record = .{ .version = 1, .fetched_at = now, .latitude = data.settings.latitude, .longitude = data.settings.longitude, .raw = data.raw };
     const source = try std.json.Stringify.valueAlloc(a, record, .{});
-    var atomic = try dir.createFileAtomic(io, file, .{ .replace = true, .make_path = true, .permissions = .fromMode(0o600) });
+    const dated = try datedPath(a, file, data.raw.daily.time[0]);
+    var atomic = try dir.createFileAtomic(io, dated, .{ .replace = true, .make_path = true, .permissions = .fromMode(0o600) });
     defer atomic.deinit(io);
     try atomic.file.writeStreamingAll(io, source);
     try atomic.replace(io);
+    // The dated copy is complete; discard an obsolete undated entry, if present.
+    dir.deleteFile(io, file) catch {};
 }
 
 fn getAt(a: A, io: Io, dir: Io.Dir, file: []const u8, settings: weather.Settings, now: i64, out: *Io.Writer, provider: anytype) !weather.Data {
@@ -65,6 +110,17 @@ fn getAt(a: A, io: Io, dir: Io.Dir, file: []const u8, settings: weather.Settings
             else => null, // A missing, damaged or unreadable cache triggers a new fetch.
         };
         if (cached) |entry| {
+            if (entry.legacy) {
+                const dated = try datedPath(a, file, entry.data.raw.daily.time[0]);
+                // Renaming preserves both the payload and its original age.
+                dir.rename(file, dir, dated, io) catch |err| switch (err) {
+                    error.Canceled => return err,
+                    else => std.debug.print("Could not rename weather cache ({t}); using cached weather.\n", .{err}),
+                };
+            } else {
+                // A usable dated entry supersedes the old filename.
+                dir.deleteFile(io, file) catch {};
+            }
             try out.print("Using cached weather ({d} seconds old).\n", .{entry.age_seconds});
             try out.flush();
             return entry.data;
@@ -202,4 +258,43 @@ test "weather cache path honors XDG and separates locations" {
     try std.testing.expect(!std.mem.eql(u8, xdg_path, try path(a, &env, other)));
     try env.put("XDG_CACHE_HOME", "relative");
     try std.testing.expectEqualStrings(home_path, try path(a, &env, test_settings));
+}
+
+test "weather cache filenames include the forecast date and reject path separators" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("nested/weather-abcd-2026-11-02.json", try datedPath(a, "nested/weather-abcd.json", "2026-11-02"));
+    try std.testing.expectError(error.InvalidWeatherData, datedPath(a, "weather.json", "../../file"));
+    try std.testing.expectError(error.InvalidWeatherData, datedPath(a, "weather.json", "2026-1-02"));
+}
+
+test "undated weather caches migrate without downloading or resetting their age" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data = try weather.parse(a, test_settings, sample);
+    const record: Record = .{ .version = 1, .fetched_at = test_time, .latitude = test_settings.latitude, .longitude = test_settings.longitude, .raw = data.raw };
+    const source = try std.json.Stringify.valueAlloc(a, record, .{});
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "weather.json", .data = source });
+    var provider: FakeProvider = .{ .allocator = a, .fail = true };
+    var output: Io.Writer.Allocating = .init(a);
+    _ = try getAt(a, std.testing.io, tmp.dir, "weather.json", test_settings, test_time + 30, &output.writer, &provider);
+    try std.testing.expectEqual(@as(usize, 0), provider.calls);
+    const moved = try tmp.dir.readFileAlloc(std.testing.io, "weather-2026-11-02.json", a, .limited(128 * 1024));
+    try std.testing.expectEqualStrings(source, moved);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.readFileAlloc(std.testing.io, "weather.json", a, .limited(128 * 1024)));
+    const cached = (try read(a, std.testing.io, tmp.dir, "weather.json", test_settings, test_time + 45)).?;
+    try std.testing.expectEqual(@as(i64, 45), cached.age_seconds);
+    try std.testing.expect(!cached.legacy);
+    _ = try getAt(a, std.testing.io, tmp.dir, "weather.json", test_settings, test_time + 45, &output.writer, &provider);
+    try std.testing.expectEqual(@as(usize, 0), provider.calls);
+    // Expired undated entries are removed only after a fresh dated download is saved.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "weather.json", .data = source });
+    provider.fail = false;
+    _ = try getAt(a, std.testing.io, tmp.dir, "weather.json", test_settings, test_time + 600, &output.writer, &provider);
+    try std.testing.expectEqual(@as(usize, 1), provider.calls);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.readFileAlloc(std.testing.io, "weather.json", a, .limited(128 * 1024)));
 }
