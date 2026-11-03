@@ -90,15 +90,29 @@ Invalid notification text, key files, and configurations fail before Bluetooth a
 
 ```sh
 ./zig-out/bin/smart-band sleep
+./zig-out/bin/smart-band sleep --all
+./zig-out/bin/smart-band sleep --all --timeout 1800
 ./zig-out/bin/smart-band sleep --since 2026-10-27
 ./zig-out/bin/smart-band sleep --since 2026-10-27 --output ./sleep-download
 ```
 
 The default request starts at local midnight seven days ago. `--since` is
 inclusive and uses the computer's local timezone, including daylight saving.
+Use `--all` to download all retained sleep/activity records: the tool requests
+from 2000-01-01 (before the band existed), then follows each returned block until
+the band reports no more records or reaches the latest minute at download start.
+`--all` and `--since` cannot be combined. This covers the activity stream,
+including sleep, movement, steps, and its heart-rate samples; other health and
+workout-history types are separate streams.
 Use `TZ=America/Chicago` before the command to select that timezone explicitly.
 The saved pairing key is used for authentication. Keep the band nearby with
 the phone's Bluetooth off for the transfer.
+
+On the tested band, Linux also needed standard Bluetooth pairing to keep a
+long transfer connected. If BlueZ reports `No agent available` and the band
+disconnects during a download, keep a Bluetooth pairing agent open while
+running the command and approve the request for your band. This computer's
+saved Bluetooth bond is separate from `auth-key.hex`.
 
 Downloads are stored in a new directory under
 `$XDG_DATA_HOME/smart-band/sleep/`, or `~/.local/share/smart-band/sleep/` by default.
@@ -123,8 +137,12 @@ computer's timezone, while UTC timestamps are also included.
 The transfer checks packet order, announced sample counts, eight-byte alignment, and any supplied
 CRC32 before decoding a block. Errors stop the download and preserve captured
 raw bytes; `download.json` marks partial results as incomplete. Transfers are
-bounded to five minutes, 64 rounds, and 31 days of samples. A fresh command can
-download the range again. The tool always acknowledges with the keep-data flag;
+bounded by a configurable timeout (900 seconds by default); `--timeout SECONDS`
+sets another positive duration. There is no fixed number of rounds or 31-day
+total sample cap. Packet inactivity is limited to 30 seconds, and a single block
+is limited to 16 MiB to reject malformed responses. A stalled cursor stops the
+transfer instead of looping. A fresh command can download the range again.
+The tool always acknowledges with the keep-data flag;
 it does not mark detailed records as consumed or delete them from the band.
 Only history still available on the band can be downloaded.
 
@@ -371,7 +389,8 @@ validation, notification encoding, chunk validation, encrypted checksums,
 replay rejection, alarm parsing, slot allocation, and verified updates, and
 weather parsing, condition mapping, response encoding, and request handling.
 Sleep-history tests cover request encoding, score interpretation, packet gaps,
-CRC failures, raw capture, CSV/JSON export, and the keep-data acknowledgment.
+CRC failures, raw capture, CSV/JSON export, and the keep-data acknowledgment,
+plus downloads exceeding 31 days and 64 blocks and stalled-cursor detection.
 They do not connect over Bluetooth. OpenSSL 3 is needed for
 the key-exchange test.
 
@@ -401,6 +420,11 @@ announcements, and the exported CSV row counts matched the JSON records.
 The transfer used the keep-data acknowledgment for every block.
 A repeat download retrieved 1,413 identical existing records plus three newly
 recorded minutes, confirming that the first transfer left records available.
+On 2026-11-03, `sleep --all` retrieved 65,424 continuous minute records from
+September 18 through November 3, including 14,576 minutes marked as sleep.
+All three blocks passed sample-count and CRC32 checks, and both CSV row counts
+matched the JSON records. This repeated full download succeeded with the saved
+Linux Bluetooth bond after closing the temporary pairing agent.
 Other models and firmware versions have not been tested.
 
 ## Protocol references

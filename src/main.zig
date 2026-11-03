@@ -51,8 +51,9 @@ fn help(out: *Io.Writer) !void {
         \\  smart-band sync-time          Sync the band to the computer's local time
         \\  smart-band weather            Update weather for the configured location (Celsius)
         \\  smart-band weather --preview  Fetch and print weather without Bluetooth
-        \\  smart-band sleep [--since YYYY-MM-DD] [--output DIR]
+        \\  smart-band sleep [--all | --since YYYY-MM-DD] [--output DIR] [--timeout SECONDS]
         \\    Download sleep/activity history (default: last seven days); keep records on band.
+        \\    --all requests all retained sleep/activity records; timeout defaults to 900 seconds.
         \\  smart-band alarm list
         \\  smart-band alarm add HH:MM [REPEAT] [--disabled]
         \\  smart-band alarm set ID HH:MM [REPEAT]
@@ -239,7 +240,7 @@ pub fn main(init: std.process.Init) void {
             error.WeatherLocationUnavailable, error.InvalidWeatherConfiguration => std.debug.print("Set weather = .{{ .location = \"City\", .latitude = 0.0, .longitude = 0.0 }} in the device config, using your city's coordinates.\n", .{}),
             error.WeatherNotRequested => std.debug.print("The band did not request current weather. Open its Weather app while running the weather command again.\n", .{}),
             error.WeatherForecastNotRequested => std.debug.print("Run weather again, open Weather on the band, and scroll to its daily forecast while the command is connected.\n", .{}),
-            error.InvalidSleepArguments, error.InvalidSleepDate => std.debug.print("Use sleep [--since YYYY-MM-DD] [--output DIR]. Dates use the computer's local timezone and cannot be in the future.\n", .{}),
+            error.InvalidSleepArguments, error.InvalidSleepDate => std.debug.print("Use sleep [--all | --since YYYY-MM-DD] [--output DIR] [--timeout SECONDS]. --all and --since are exclusive; timeout must be positive. Dates use the computer's local timezone and cannot be in the future.\n", .{}),
             error.WeatherFetchTimedOut, error.WeatherProviderFailed => std.debug.print("Could not fetch weather from Open-Meteo; try weather --preview to check the data connection.\n", .{}),
             error.DeviceNotFound, error.DeviceDisconnected, error.DBusCallFailed => std.debug.print("Keep the band nearby and awake; temporarily disconnect the phone app, then run scan.\n", .{}),
             error.PairingKeyUnavailable, error.InvalidPairingKey => std.debug.print("Save the 32 hexadecimal pairing-key digits in auth-key.hex beside the config, or set auth_key_file.\n", .{}),

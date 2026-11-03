@@ -169,12 +169,28 @@ const Session = struct {
     fn next(self: *Session, deadline: Io.Timestamp) !Message {
         while (true) {
             const packet = try self.receiver.next(self.io, deadline);
-            const message = try self.decoder.push(packet, self.key);
-            if (packet.len >= 5 and packet[0] == 3 and packet[1] & 4 != 0) {
-                try write(self.connection, self.reader, &.{ 4, 0, packet[3], 1, packet[4] });
-            }
-            if (message) |value| return value;
+            if (try self.processPacket(packet)) |value| return value;
         }
+    }
+
+    fn processPacket(self: *Session, packet: []const u8) !?Message {
+        const message = try self.decoder.push(packet, self.key);
+        if (packet.len >= 5 and packet[0] == 3 and packet[1] & 4 != 0) {
+            try write(self.connection, self.reader, &.{ 4, 0, packet[3], 1, packet[4] });
+        }
+        if (message) |value| {
+            // Keep the Zepp channel alive while legacy history characteristics stream.
+            if (value.endpoint == 0x15 and value.data[0] == 3) {
+                try self.send(0x15, &.{4}, false);
+                return null;
+            }
+        }
+        return message;
+    }
+
+    fn maintain(context: *anyopaque) anyerror!void {
+        const self: *Session = @ptrCast(@alignCast(context));
+        while (try self.receiver.poll()) |packet| _ = try self.processPacket(packet);
     }
 };
 
@@ -267,10 +283,6 @@ fn run(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []cons
     }
     std.debug.print("Band authentication succeeded.\n", .{});
     switch (action) {
-        .sleep => |value| {
-            try sleep.fromBand(a, io, connection, nodes, device, value.options, value.out);
-            return;
-        },
         .sync_time => |out| {
             try band_time.sync(a, io, connection, nodes, device, out);
             return;
@@ -286,6 +298,10 @@ fn run(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []cons
     try session.send(0, &.{3}, false);
     const services = try session.receive(0);
     const alert = switch (action) {
+        .sleep => |value| {
+            try sleep.fromBand(a, io, connection, nodes, device, value.options, value.out, .{ .context = &session, .process = Session.maintain });
+            return;
+        },
         .weather => |value| {
             // Replies share the decoder buffer; consume the service list before more reads.
             const encrypted_http = try serviceEncryption(services, 1);
@@ -302,7 +318,7 @@ fn run(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []cons
             return;
         },
         .notification => |value| value,
-        .sync_time, .sleep => unreachable,
+        .sync_time => unreachable,
     };
     const encrypted_notifications = try serviceEncryption(services, 0x1e);
     const encrypted_files = try serviceEncryption(services, 0x0d);
