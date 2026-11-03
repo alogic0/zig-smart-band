@@ -17,7 +17,7 @@ pub const Options = struct {
         if (self.search_timeout_seconds == 0 or self.search_timeout_seconds > 600 or
             self.connect_timeout_seconds == 0 or self.connect_timeout_seconds > 120 or
             self.service_timeout_seconds == 0 or self.service_timeout_seconds > 120 or
-            self.connect_attempts == 0 or self.connect_attempts > 5 or self.retry_delay_seconds > 10)
+            self.connect_attempts == 0 or self.retry_delay_seconds > 10)
             return error.InvalidBluetoothOptions;
     }
 };
@@ -162,6 +162,24 @@ test "setup retries stop at the limit and preserve the final error" {
     try std.testing.expectEqual(@as(usize, 0), fake.pauses);
 }
 
+test "configured attempt counts above five are honored without counter overflow" {
+    const failures: [255]anyerror = @splat(error.DeviceDisconnected);
+    var fake: Fake = .{ .errors = failures[0..9] };
+    _ = try retrySetup(&fake, 10);
+    try std.testing.expectEqual(@as(usize, 10), fake.calls);
+    try std.testing.expectEqual(@as(usize, 9), fake.pauses);
+
+    fake = .{ .errors = &failures };
+    try std.testing.expectError(error.DeviceDisconnected, retrySetup(&fake, 10));
+    try std.testing.expectEqual(@as(usize, 10), fake.calls);
+    try std.testing.expectEqual(@as(usize, 9), fake.pauses);
+
+    fake = .{ .errors = &failures };
+    try std.testing.expectError(error.DeviceDisconnected, retrySetup(&fake, 255));
+    try std.testing.expectEqual(@as(usize, 255), fake.calls);
+    try std.testing.expectEqual(@as(usize, 254), fake.pauses);
+}
+
 test "authentication and nontransport failures never cause setup retries" {
     for ([_]anyerror{ error.AuthenticationRequired, error.InvalidDBusReply, error.NoPoweredBluetoothAdapter, error.Canceled }) |failure| {
         var fake: Fake = .{ .errors = &.{failure} };
@@ -173,6 +191,8 @@ test "authentication and nontransport failures never cause setup retries" {
 
 test "Bluetooth timeouts and retry counts are bounded" {
     try (Options{}).validate();
+    try (Options{ .connect_attempts = 10 }).validate();
+    try (Options{ .connect_attempts = 255 }).validate();
     try std.testing.expectError(error.InvalidBluetoothOptions, (Options{ .search_timeout_seconds = 0 }).validate());
     try std.testing.expectError(error.InvalidBluetoothOptions, (Options{ .search_timeout_seconds = 601 }).validate());
     try std.testing.expectError(error.InvalidBluetoothOptions, (Options{ .connect_timeout_seconds = 121 }).validate());

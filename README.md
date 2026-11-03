@@ -233,7 +233,8 @@ The limits are optional fields in the config's root `bluetooth` section:
 ```
 
 Search accepts 1–600 seconds, connect/service timeouts 1–120 seconds, attempts
-1–5, and retry delay 0–10 seconds. Set `connect_attempts` to 1 to disable setup
+1–255, and retry delay 0–10 seconds. For example, `.connect_attempts = 10`
+allows up to ten total setup attempts. Set `connect_attempts` to 1 to disable setup
 retries. Existing configs use the defaults above. Explicit address overrides
 bypass the device config and use defaults; `scan [seconds]` retains its own
 1–60 second duration.

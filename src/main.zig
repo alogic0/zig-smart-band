@@ -208,6 +208,7 @@ pub fn main(init: std.process.Init) void {
     execute(init) catch |err| {
         std.debug.print("smart-band: {t}\n", .{err});
         switch (err) {
+            error.InvalidBluetoothOptions => std.debug.print("Check the config's bluetooth section: search_timeout_seconds 1-600, connect_timeout_seconds and service_timeout_seconds 1-120, connect_attempts 1-255, retry_delay_seconds 0-10.\n", .{}),
             error.DeviceNotFound, error.DeviceDisconnected, error.DBusCallFailed => std.debug.print("Keep the band nearby and awake; temporarily disconnect the phone app, then run scan.\n", .{}),
             error.PairingKeyUnavailable, error.InvalidPairingKey => std.debug.print("Save the 32 hexadecimal pairing-key digits in auth-key.hex beside the config, or set auth_key_file.\n", .{}),
             error.AuthenticationRequired => std.debug.print("The band requires authentication. No pairing keys or settings were changed.\n", .{}),
