@@ -121,18 +121,23 @@ fn getAt(a: A, io: Io, dir: Io.Dir, file: []const u8, settings: weather.Settings
             else => null, // A missing, damaged or unreadable cache triggers a new fetch.
         };
         if (cached) |entry| {
+            var cached_file = try datedPath(a, file, entry.data.raw.daily.time[0]);
             if (entry.previous_name) |previous_name| {
-                const dated = try datedPath(a, file, entry.data.raw.daily.time[0]);
                 const previous = try std.fs.path.join(a, &.{ std.fs.path.dirname(file) orelse ".", previous_name });
                 // Renaming preserves both the payload and its original age.
-                dir.rename(previous, dir, dated, io) catch |err| switch (err) {
+                dir.rename(previous, dir, cached_file, io) catch |err| switch (err) {
                     error.Canceled => return err,
-                    else => std.debug.print("Could not rename weather cache ({t}); using cached weather.\n", .{err}),
+                    else => {
+                        std.debug.print("Could not rename weather cache {s} to {s} ({t}); using cached weather.\n", .{ previous, cached_file, err });
+                        cached_file = previous;
+                    },
                 };
             } else {
                 try removeOldNames(a, io, dir, file, entry.data.raw.daily.time[0]);
             }
-            try out.print("Using cached weather ({d} seconds old).\n", .{entry.age_seconds});
+            const full_path = try dir.realPathFileAlloc(io, cached_file, a);
+            defer a.free(full_path);
+            try out.print("Using cached weather ({d} seconds old): {s}\n", .{ entry.age_seconds, full_path });
             try out.flush();
             return entry.data;
         }
@@ -141,12 +146,20 @@ fn getAt(a: A, io: Io, dir: Io.Dir, file: []const u8, settings: weather.Settings
     try out.flush();
     const data = try provider.fetch(settings);
     if (settings.cache_ttl_seconds != 0) {
+        const dated = try datedPath(a, file, data.raw.daily.time[0]);
         // Persist a successful download before the caller opens any Bluetooth link.
         // Using the request's start time makes the age conservative.
         save(a, io, dir, file, data, now) catch |err| switch (err) {
             error.OutOfMemory, error.Canceled => return err,
-            else => std.debug.print("Could not save weather cache ({t}); continuing with downloaded weather.\n", .{err}),
+            else => {
+                std.debug.print("Could not save weather cache {s} ({t}); continuing with downloaded weather.\n", .{ dated, err });
+                return data;
+            },
         };
+        const full_path = try dir.realPathFileAlloc(io, dated, a);
+        defer a.free(full_path);
+        try out.print("Saved weather cache: {s}\n", .{full_path});
+        try out.flush();
     }
     return data;
 }

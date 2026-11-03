@@ -117,7 +117,8 @@ saved Bluetooth bond is separate from `auth-key.hex`.
 Downloads are stored in a new directory under
 `$XDG_DATA_HOME/smart-band/sleep/`, or `~/.local/share/smart-band/sleep/` by default.
 `--output DIR` selects the directory. Existing downloads are not overwritten.
-Files use mode `0600`; new directories use mode `0700`.
+Files use mode `0600`; new directories use mode `0700`. The log prints each
+file's full path after saving it, including partial captures.
 
 Each download contains:
 
@@ -171,6 +172,7 @@ and previews reuse the saved data for 600 seconds (10 minutes) by default.
 `cache_ttl_seconds` in the `weather` section changes that lifetime; set it to
 `0` to fetch on every invocation and disable cache reads and writes.
 
+The log prints the full cache file path when weather is saved or reused.
 Cache files live in `$XDG_CACHE_HOME/smart-band/`, or
 `~/.cache/smart-band/` when `XDG_CACHE_HOME` is unset. Each location has its own
 cache, named `weather-YYYY-MM-DD-LOCATION_HASH.json` using the weather location's

@@ -208,15 +208,16 @@ const Capture = struct {
     io: Io,
     dir: Io.Dir,
     options: Options,
+    out: *Io.Writer,
     samples: std.ArrayList(Sample) = .empty,
     blocks: std.ArrayList(Block) = .empty,
 
-    fn init(a: A, io: Io, options: Options) !Capture {
+    fn init(a: A, io: Io, options: Options, out: *Io.Writer) !Capture {
         const dir = try Io.Dir.cwd().createDirPathOpen(io, options.output_dir, .{ .permissions = .fromMode(0o700) });
         errdefer dir.close(io);
         // Reserve this capture directory; never overwrite a previous download.
         try dir.writeFile(io, .{ .sub_path = "download.json", .data = "{\"complete\":false,\"status\":\"in_progress\"}\n", .flags = .{ .exclusive = true, .permissions = .fromMode(0o600) } });
-        return .{ .a = a, .io = io, .dir = dir, .options = options };
+        return .{ .a = a, .io = io, .dir = dir, .options = options, .out = out };
     }
     fn deinit(self: *Capture) void {
         self.dir.close(self.io);
@@ -227,6 +228,13 @@ const Capture = struct {
         const name = try std.fmt.allocPrint(self.a, "block-{d:0>4}{s}.bin", .{ index, if (complete) "" else ".partial" });
         try self.dir.writeFile(self.io, .{ .sub_path = name, .data = bytes, .flags = .{ .exclusive = true, .permissions = .fromMode(0o600) } });
         try self.blocks.append(self.a, .{ .index = index, .start_utc = try info.start.unixSeconds(), .reported_length = info.reported_length, .received_bytes = bytes.len, .raw_header = .{ .values = info.raw }, .reported_crc32 = crc, .computed_crc32 = std.hash.Crc32.hash(bytes), .complete = complete });
+        try self.logFile(name);
+    }
+    fn logFile(self: *Capture, name: []const u8) !void {
+        const full_path = try self.dir.realPathFileAlloc(self.io, name, self.a);
+        defer self.a.free(full_path);
+        try self.out.print("Saved file: {s}\n", .{full_path});
+        try self.out.flush();
     }
     fn exportFiles(self: *Capture, complete: bool, failure: ?[]const u8) !void {
         const source = try std.json.Stringify.valueAlloc(self.a, .{
@@ -247,6 +255,7 @@ const Capture = struct {
         defer atomic.deinit(self.io);
         try atomic.file.writeStreamingAll(self.io, source);
         try atomic.replace(self.io);
+        try self.logFile("download.json");
         inline for (.{ false, true }) |sleep_only| {
             const name = if (sleep_only) "sleep.csv" else "activity.csv";
             const file = try self.dir.createFile(self.io, name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
@@ -265,6 +274,7 @@ const Capture = struct {
                 try out.print(",{d},{d},{d},{d},{s}\n", .{ sample.raw[4], sample.raw[5], sample.raw[6], sample.raw[7], sample.stage() });
             }
             try out.flush();
+            try self.logFile(name);
         }
     }
 };
@@ -370,7 +380,7 @@ fn transfer(capture: *Capture, transport: anytype, requested: clock.Calendar, in
 }
 
 pub fn download(a: A, io: Io, transport: anytype, options: Options, out: *Io.Writer) !void {
-    var capture = try Capture.init(a, io, options);
+    var capture = try Capture.init(a, io, options, out);
     defer capture.deinit();
     try out.print("Saving sleep/activity history to {s}\n", .{options.output_dir});
     if (options.all_history) try out.writeAll("Requesting all available sleep/activity history.\n");
@@ -392,7 +402,7 @@ pub fn download(a: A, io: Io, transport: anytype, options: Options, out: *Io.Wri
     for (capture.samples.items) |sample| if (sample.sleeping()) {
         sleeping_minutes += 1;
     };
-    try out.print("Downloaded {d} activity minutes, including {d} sleeping minutes.\nFiles: download.json, activity.csv, sleep.csv, and raw block files.\n", .{ capture.samples.items.len, sleeping_minutes });
+    try out.print("Downloaded {d} activity minutes, including {d} sleeping minutes.\n", .{ capture.samples.items.len, sleeping_minutes });
 }
 
 test "sleep requests use Huami minute timestamps and stage estimates preserve original bytes" {
