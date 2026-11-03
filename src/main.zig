@@ -9,6 +9,7 @@ const zepp = @import("zepp.zig");
 const alarms = @import("alarms.zig");
 const weather = @import("weather.zig");
 const weather_cache = @import("weather_cache.zig");
+const sleep = @import("sleep.zig");
 const A = std.mem.Allocator;
 const Io = std.Io;
 const discover = connect.discover;
@@ -50,6 +51,8 @@ fn help(out: *Io.Writer) !void {
         \\  smart-band sync-time          Sync the band to the computer's local time
         \\  smart-band weather            Update weather for the configured location (Celsius)
         \\  smart-band weather --preview  Fetch and print weather without Bluetooth
+        \\  smart-band sleep [--since YYYY-MM-DD] [--output DIR]
+        \\    Download sleep/activity history (default: last seven days); keep records on band.
         \\  smart-band alarm list
         \\  smart-band alarm add HH:MM [REPEAT] [--disabled]
         \\  smart-band alarm set ID HH:MM [REPEAT]
@@ -101,9 +104,11 @@ fn execute(init: std.process.Init) !void {
     const sync_time = std.mem.eql(u8, command[0], "sync-time");
     const alarm = std.mem.eql(u8, command[0], "alarm");
     const weather_command = std.mem.eql(u8, command[0], "weather");
-    if (!scan and !info and !battery and !inspect and !notify and !sync_time and !alarm and !weather_command) return error.UnknownCommand;
-    if (!alarm and command.len > 2) return error.InvalidArguments;
+    const sleep_command = std.mem.eql(u8, command[0], "sleep");
+    if (!scan and !info and !battery and !inspect and !notify and !sync_time and !alarm and !weather_command and !sleep_command) return error.UnknownCommand;
+    if (!alarm and !sleep_command and command.len > 2) return error.InvalidArguments;
     const alarm_request: ?alarms.Command = if (alarm) try alarms.parse(command[1..]) else null;
+    const sleep_request: ?sleep.Options = if (sleep_command) try sleep.parse(a, io, init.environ_map, command[1..]) else null;
     if (sync_time and command.len != 1) return error.InvalidArguments;
     const weather_preview = weather_command and command.len == 2 and std.mem.eql(u8, command[1], "--preview");
     if (weather_command and command.len != 1 and !weather_preview) return error.InvalidArguments;
@@ -121,11 +126,11 @@ fn execute(init: std.process.Init) !void {
     var wake_screen: ?bool = null;
     var weather_settings: ?weather.Settings = null;
     defer if (auth_key) |*key| std.crypto.secureZero(u8, key);
-    const address = if (scan) "" else if (!notify and !sync_time and !alarm and !weather_command and command.len == 2) command[1] else blk: {
+    const address = if (scan) "" else if (!notify and !sync_time and !alarm and !weather_command and !sleep_command and command.len == 2) command[1] else blk: {
         const path = config_path orelse try config.defaultPath(a, init.environ_map);
         const saved = try config.load(a, io, path);
         bluetooth = saved.bluetooth;
-        if (notify or sync_time or alarm or (weather_command and !weather_preview)) auth_key = try config.loadAuthKey(a, io, path, saved);
+        if (notify or sync_time or alarm or sleep_command or (weather_command and !weather_preview)) auth_key = try config.loadAuthKey(a, io, path, saved);
         if (notify) wake_screen = saved.notification_wake_screen;
         if (weather_command) weather_settings = saved.weather orelse return error.WeatherLocationUnavailable;
         break :blk saved.device.address;
@@ -157,7 +162,10 @@ fn execute(init: std.process.Init) !void {
     const nodes = ready.nodes;
     const device = ready.device;
 
-    if (weather_data) |data| {
+    if (sleep_request) |request| {
+        _ = readBattery(a, io, &connection, nodes, device) catch {};
+        try zepp.downloadSleep(a, io, &connection, nodes, device, auth_key.?, request, out);
+    } else if (weather_data) |data| {
         // Let initial GATT traffic settle, without requiring battery access.
         _ = readBattery(a, io, &connection, nodes, device) catch {};
         try zepp.updateWeather(a, io, &connection, nodes, device, auth_key.?, data, out);
@@ -231,6 +239,7 @@ pub fn main(init: std.process.Init) void {
             error.WeatherLocationUnavailable, error.InvalidWeatherConfiguration => std.debug.print("Set weather = .{{ .location = \"City\", .latitude = 0.0, .longitude = 0.0 }} in the device config, using your city's coordinates.\n", .{}),
             error.WeatherNotRequested => std.debug.print("The band did not request current weather. Open its Weather app while running the weather command again.\n", .{}),
             error.WeatherForecastNotRequested => std.debug.print("Run weather again, open Weather on the band, and scroll to its daily forecast while the command is connected.\n", .{}),
+            error.InvalidSleepArguments, error.InvalidSleepDate => std.debug.print("Use sleep [--since YYYY-MM-DD] [--output DIR]. Dates use the computer's local timezone and cannot be in the future.\n", .{}),
             error.WeatherFetchTimedOut, error.WeatherProviderFailed => std.debug.print("Could not fetch weather from Open-Meteo; try weather --preview to check the data connection.\n", .{}),
             error.DeviceNotFound, error.DeviceDisconnected, error.DBusCallFailed => std.debug.print("Keep the band nearby and awake; temporarily disconnect the phone app, then run scan.\n", .{}),
             error.PairingKeyUnavailable, error.InvalidPairingKey => std.debug.print("Save the 32 hexadecimal pairing-key digits in auth-key.hex beside the config, or set auth_key_file.\n", .{}),
@@ -261,4 +270,5 @@ test {
     _ = @import("alarms.zig");
     _ = @import("weather.zig");
     _ = @import("weather_cache.zig");
+    _ = @import("sleep.zig");
 }

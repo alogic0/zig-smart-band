@@ -8,6 +8,7 @@ const notification = @import("notification.zig");
 const band_time = @import("band_time.zig");
 const alarms = @import("alarms.zig");
 const weather = @import("weather.zig");
+const sleep = @import("sleep.zig");
 const Aes = std.crypto.core.aes.Aes128;
 const Crc = std.hash.Crc32;
 const Io = std.Io;
@@ -182,7 +183,12 @@ const Action = union(enum) {
     sync_time: *Io.Writer,
     alarm: struct { command: alarms.Command, out: *Io.Writer },
     weather: struct { data: weather.Data, out: *Io.Writer },
+    sleep: struct { options: sleep.Options, out: *Io.Writer },
 };
+
+pub fn downloadSleep(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []const bluez.Node, device: bluez.Node, secret: [16]u8, options: sleep.Options, out: *Io.Writer) !void {
+    try run(a, io, connection, nodes, device, secret, .{ .sleep = .{ .options = options, .out = out } });
+}
 
 pub fn updateWeather(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []const bluez.Node, device: bluez.Node, secret: [16]u8, data: weather.Data, out: *Io.Writer) !void {
     try run(a, io, connection, nodes, device, secret, .{ .weather = .{ .data = data, .out = out } });
@@ -261,6 +267,10 @@ fn run(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []cons
     }
     std.debug.print("Band authentication succeeded.\n", .{});
     switch (action) {
+        .sleep => |value| {
+            try sleep.fromBand(a, io, connection, nodes, device, value.options, value.out);
+            return;
+        },
         .sync_time => |out| {
             try band_time.sync(a, io, connection, nodes, device, out);
             return;
@@ -292,7 +302,7 @@ fn run(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []cons
             return;
         },
         .notification => |value| value,
-        .sync_time => unreachable,
+        .sync_time, .sleep => unreachable,
     };
     const encrypted_notifications = try serviceEncryption(services, 0x1e);
     const encrypted_files = try serviceEncryption(services, 0x0d);

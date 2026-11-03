@@ -92,18 +92,18 @@ pub const Receiver = struct {
         }
     }
 
+    pub fn poll(self: *Receiver) !?[]const u8 {
+        if (self.failed) return error.InvalidBluetoothSignal;
+        if (self.head == self.tail) return null;
+        const index = self.head % 64;
+        self.head += 1;
+        return self.packets[index][0..self.lengths[index]];
+    }
+
     pub fn next(self: *Receiver, io: std.Io, deadline: std.Io.Timestamp) ![]const u8 {
         while (true) {
-            if (self.failed) return error.InvalidBluetoothSignal;
-            if (self.head != self.tail) {
-                const index = self.head % 64;
-                self.head += 1;
-                return self.packets[index][0..self.lengths[index]];
-            }
-            if (std.Io.Timestamp.now(io, .awake).nanoseconds >= deadline.nanoseconds) return error.BandResponseTimedOut;
-            const processed = self.connection.api.sd_bus_process(self.connection.bus, null);
-            try checked(processed);
-            if (processed == 0) try checked(self.connection.api.sd_bus_wait(self.connection.bus, 100_000));
+            if (try self.poll()) |packet| return packet;
+            try self.connection.processSignals(io, deadline);
         }
     }
 };
@@ -120,6 +120,13 @@ pub const Connection = struct {
     library: std.DynLib,
     api: Api,
     bus: *Bus,
+
+    pub fn processSignals(self: *Connection, io: std.Io, deadline: std.Io.Timestamp) !void {
+        if (std.Io.Timestamp.now(io, .awake).nanoseconds >= deadline.nanoseconds) return error.BandResponseTimedOut;
+        const processed = self.api.sd_bus_process(self.bus, null);
+        try checked(processed);
+        if (processed == 0) try checked(self.api.sd_bus_wait(self.bus, 100_000));
+    }
 
     pub fn init() !Connection {
         var library = std.DynLib.open("libsystemd.so.0") catch return error.SystemdLibraryUnavailable;

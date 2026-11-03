@@ -84,6 +84,49 @@ Invalid notification text, key files, and configurations fail before Bluetooth a
 - `alarm`: list, add, edit, enable, disable, or delete alarms on the configured band.
 - `weather`: fetch weather for the configured location and answer the band's
   authenticated weather requests. `weather --preview` prints the forecast.
+- `sleep`: download sleep/activity history and export raw records, JSON, and CSV.
+
+## Sleep history
+
+```sh
+./zig-out/bin/smart-band sleep
+./zig-out/bin/smart-band sleep --since 2026-10-27
+./zig-out/bin/smart-band sleep --since 2026-10-27 --output ./sleep-download
+```
+
+The default request starts at local midnight seven days ago. `--since` is
+inclusive and uses the computer's local timezone, including daylight saving.
+Use `TZ=America/Chicago` before the command to select that timezone explicitly.
+The saved pairing key is used for authentication. Keep the band nearby with
+the phone's Bluetooth off for the transfer.
+
+Downloads are stored in a new directory under
+`$XDG_DATA_HOME/smart-band/sleep/`, or `~/.local/share/smart-band/sleep/` by default.
+`--output DIR` selects the directory. Existing downloads are not overwritten.
+Files use mode `0600`; new directories use mode `0700`.
+
+Each download contains:
+
+- `download.json`: completion status, failure details if any, block metadata,
+  UTC timestamps, and the original eight bytes of each activity sample.
+- `activity.csv`: all downloaded activity minutes, raw sleep scores, heart rate,
+  and estimated sleep stage. Invalid heart-rate sentinels are left empty.
+- `sleep.csv`: the same columns, restricted to records the band marks as sleep.
+- `block-0001.bin`, etc.: original activity bytes before decoding; incomplete
+  blocks use `.partial.bin`.
+
+The Band 7 records one activity sample per minute. Its light/deep/REM labels in
+the CSV are estimates using the reference implementation's score thresholds;
+the original scores and bytes remain available. Times in the CSV follow the
+computer's timezone, while UTC timestamps are also included.
+
+The transfer checks packet order, announced sample counts, eight-byte alignment, and any supplied
+CRC32 before decoding a block. Errors stop the download and preserve captured
+raw bytes; `download.json` marks partial results as incomplete. Transfers are
+bounded to five minutes, 64 rounds, and 31 days of samples. A fresh command can
+download the range again. The tool always acknowledges with the keep-data flag;
+it does not mark detailed records as consumed or delete them from the band.
+Only history still available on the band can be downloaded.
 
 ## Weather
 
@@ -308,11 +351,12 @@ battery read to let a fresh link settle; weather uses a best-effort battery read
 and alarm commands authenticate directly.
 
 Battery/info commands still use ordinary readable GATT services. Authentication
-is performed for notifications, clock synchronization, alarms, and weather. The tool does not pair,
+is performed for notifications, clock synchronization, alarms, weather, and sleep
+history. The tool does not pair,
 unbind, reset, or update firmware. It changes the clock only with `sync-time`
 and alarms only through explicit alarm commands, and the temperature display unit
 and weather location through `weather`. It changes the screen-wake preference
-only when explicitly configured. NFC payments, history, and health data
+only when explicitly configured. NFC payments and other health-history types
 are outside this version.
 
 ## Validation
@@ -326,6 +370,8 @@ Offline tests cover battery/address/config parsing, key exchange and peer
 validation, notification encoding, chunk validation, encrypted checksums,
 replay rejection, alarm parsing, slot allocation, and verified updates, and
 weather parsing, condition mapping, response encoding, and request handling.
+Sleep-history tests cover request encoding, score interpretation, packet gaps,
+CRC failures, raw capture, CSV/JSON export, and the keep-data acknowledgment.
 They do not connect over Bluetooth. OpenSSL 3 is needed for
 the key-exchange test.
 
@@ -348,6 +394,13 @@ user confirmed the updated weather appeared. In a subsequent live test, opening
 Weather and scrolling to the daily forecast triggered daily and hourly forecast
 requests. The tool supplied both, and the user confirmed high and low
 temperatures appeared.
+Sleep-history download was tested on the same band: three blocks yielded
+11,553 continuous minute records, including 3,140 minutes marked as sleep.
+All three raw-block CRC32 values matched the band, sample counts matched their
+announcements, and the exported CSV row counts matched the JSON records.
+The transfer used the keep-data acknowledgment for every block.
+A repeat download retrieved 1,413 identical existing records plus three newly
+recorded minutes, confirming that the first transfer left records available.
 Other models and firmware versions have not been tested.
 
 ## Protocol references
@@ -358,6 +411,7 @@ Other models and firmware versions have not been tested.
 - [Gadgetbridge Huami protocol implementation](https://github.com/Freeyourgadget/Gadgetbridge/tree/master/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/huami)
 - [Gadgetbridge Zepp OS weather format](https://github.com/Freeyourgadget/Gadgetbridge/blob/master/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/huami/zeppos/ZeppOsWeather.java)
 - [Open-Meteo forecast API](https://open-meteo.com/en/docs)
+- [Gadgetbridge Huami activity history protocol](https://github.com/Freeyourgadget/Gadgetbridge/tree/master/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/huami/operations/fetch)
 
 The implementation is original Zig code. Gadgetbridge sources were consulted
 for wire-format facts; their Java implementations are not included.

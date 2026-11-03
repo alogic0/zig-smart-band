@@ -23,6 +23,7 @@ const Tm = extern struct {
 extern "c" fn time(timer: ?*std.c.time_t) std.c.time_t;
 extern "c" fn tzset() void;
 extern "c" fn localtime_r(timer: *const std.c.time_t, result: *Tm) ?*Tm;
+extern "c" fn mktime(tm: *Tm) std.c.time_t;
 
 pub const Calendar = struct {
     year: u16,
@@ -89,9 +90,14 @@ fn daysInMonth(year: u16, month: u8) u8 {
 }
 
 pub fn localNow() !Calendar {
-    tzset();
     const seconds = time(null);
     if (seconds == -1) return error.SystemClockUnavailable;
+    return localAt(@intCast(seconds));
+}
+
+pub fn localAt(timestamp: i64) !Calendar {
+    tzset();
+    const seconds: std.c.time_t = @intCast(timestamp);
     var tm: Tm = undefined;
     if (localtime_r(&seconds, &tm) == null) return error.SystemClockUnavailable;
     if (tm.year < -318 or tm.year > 8099 or tm.mon < 0 or tm.mon > 11 or
@@ -110,6 +116,35 @@ pub fn localNow() !Calendar {
     };
     try result.validate();
     return result;
+}
+
+pub fn localDate(year: u16, month: u8, day: u8) !Calendar {
+    const candidate: Calendar = .{ .year = year, .month = month, .day = day, .hour = 0, .minute = 0, .second = 0, .weekday = 0, .utc_quarters = 0 };
+    try candidate.validate();
+    tzset();
+    var tm = std.mem.zeroes(Tm);
+    tm.year = @as(c_int, year) - 1900;
+    tm.mon = @as(c_int, month) - 1;
+    tm.mday = day;
+    tm.isdst = -1;
+    const seconds = mktime(&tm);
+    if (seconds == -1) return error.SystemClockUnavailable;
+    return localAt(@intCast(seconds));
+}
+
+pub fn localDaysAgo(days: u8) !Calendar {
+    tzset();
+    const seconds = time(null);
+    var tm: Tm = undefined;
+    if (seconds == -1 or localtime_r(&seconds, &tm) == null) return error.SystemClockUnavailable;
+    tm.mday -= days;
+    tm.hour = 0;
+    tm.min = 0;
+    tm.sec = 0;
+    tm.isdst = -1;
+    const result = mktime(&tm);
+    if (result == -1) return error.SystemClockUnavailable;
+    return localAt(@intCast(result));
 }
 
 pub fn sync(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []const bluez.Node, device: bluez.Node, out: *Io.Writer) !void {
