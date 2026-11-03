@@ -12,7 +12,7 @@ const Record = struct {
     longitude: f64,
     raw: Raw,
 };
-const Cached = struct { data: weather.Data, age_seconds: i64, legacy: bool = false };
+const Cached = struct { data: weather.Data, age_seconds: i64, previous_name: ?[]const u8 = null };
 
 fn validDate(date: []const u8) bool {
     if (date.len != 10 or date[4] != '-' or date[7] != '-') return false;
@@ -24,8 +24,17 @@ fn validDate(date: []const u8) bool {
 
 fn datedPath(a: A, base: []const u8, date: []const u8) ![]u8 {
     if (!validDate(date)) return error.InvalidWeatherData;
-    const name = try std.fmt.allocPrint(a, "{s}-{s}.json", .{ std.fs.path.stem(base), date });
+    const stem = std.fs.path.stem(base);
+    const name = try std.fmt.allocPrint(a, "weather-{s}{s}.json", .{ date, stem["weather".len..] });
     return std.fs.path.join(a, &.{ std.fs.path.dirname(base) orelse ".", name });
+}
+
+fn removeOldNames(a: A, io: Io, dir: Io.Dir, base: []const u8, date: []const u8) !void {
+    const name = try std.fmt.allocPrint(a, "{s}-{s}.json", .{ std.fs.path.stem(base), date });
+    const previous = try std.fs.path.join(a, &.{ std.fs.path.dirname(base) orelse ".", name });
+    const current = try datedPath(a, base, date);
+    dir.deleteFile(io, base) catch {};
+    if (!std.mem.eql(u8, previous, current)) dir.deleteFile(io, previous) catch {};
 }
 
 pub fn path(a: A, env: *const std.process.Environ.Map, settings: weather.Settings) ![]u8 {
@@ -72,20 +81,22 @@ fn read(a: A, io: Io, dir: Io.Dir, base: []const u8, settings: weather.Settings,
     var iterator = directory.iterate();
     var latest: ?Cached = null;
     while (try iterator.next(io)) |entry| {
-        const legacy = std.mem.eql(u8, entry.name, name);
-        if (!legacy) {
-            if (entry.name.len != stem.len + 16 or !std.mem.startsWith(u8, entry.name, stem) or
-                entry.name[stem.len] != '-' or !std.mem.endsWith(u8, entry.name, ".json") or
-                !validDate(entry.name[stem.len + 1 ..][0..10])) continue;
-        }
+        const undated = std.mem.eql(u8, entry.name, name);
+        const dated_length = entry.name.len == stem.len + 16 and std.mem.endsWith(u8, entry.name, ".json");
+        const date_first = dated_length and std.mem.startsWith(u8, entry.name, "weather-") and
+            validDate(entry.name[8..18]) and std.mem.eql(u8, entry.name[18 .. entry.name.len - 5], stem["weather".len..]);
+        const date_last = dated_length and std.mem.startsWith(u8, entry.name, stem) and
+            entry.name[stem.len] == '-' and validDate(entry.name[stem.len + 1 ..][0..10]);
+        if (!undated and !date_first and !date_last) continue;
         var candidate = (readFile(a, io, directory, entry.name, settings, now) catch |err| switch (err) {
             error.OutOfMemory, error.Canceled => return err,
             else => null,
         }) orelse continue;
-        if (!legacy and !std.mem.eql(u8, entry.name[stem.len + 1 ..][0..10], candidate.data.raw.daily.time[0])) continue;
-        candidate.legacy = legacy;
+        const date = if (date_first) entry.name[8..18] else if (date_last) entry.name[stem.len + 1 ..][0..10] else null;
+        if (date) |value| if (!std.mem.eql(u8, value, candidate.data.raw.daily.time[0])) continue;
+        if (!date_first) candidate.previous_name = try a.dupe(u8, entry.name);
         if (latest == null or candidate.age_seconds < latest.?.age_seconds or
-            (candidate.age_seconds == latest.?.age_seconds and !legacy)) latest = candidate;
+            (candidate.age_seconds == latest.?.age_seconds and date_first)) latest = candidate;
     }
     return latest;
 }
@@ -98,8 +109,8 @@ fn save(a: A, io: Io, dir: Io.Dir, file: []const u8, data: weather.Data, now: i6
     defer atomic.deinit(io);
     try atomic.file.writeStreamingAll(io, source);
     try atomic.replace(io);
-    // The dated copy is complete; discard an obsolete undated entry, if present.
-    dir.deleteFile(io, file) catch {};
+    // The date-first copy is complete; discard obsolete names for the same day.
+    try removeOldNames(a, io, dir, file, data.raw.daily.time[0]);
 }
 
 fn getAt(a: A, io: Io, dir: Io.Dir, file: []const u8, settings: weather.Settings, now: i64, out: *Io.Writer, provider: anytype) !weather.Data {
@@ -110,16 +121,16 @@ fn getAt(a: A, io: Io, dir: Io.Dir, file: []const u8, settings: weather.Settings
             else => null, // A missing, damaged or unreadable cache triggers a new fetch.
         };
         if (cached) |entry| {
-            if (entry.legacy) {
+            if (entry.previous_name) |previous_name| {
                 const dated = try datedPath(a, file, entry.data.raw.daily.time[0]);
+                const previous = try std.fs.path.join(a, &.{ std.fs.path.dirname(file) orelse ".", previous_name });
                 // Renaming preserves both the payload and its original age.
-                dir.rename(file, dir, dated, io) catch |err| switch (err) {
+                dir.rename(previous, dir, dated, io) catch |err| switch (err) {
                     error.Canceled => return err,
                     else => std.debug.print("Could not rename weather cache ({t}); using cached weather.\n", .{err}),
                 };
             } else {
-                // A usable dated entry supersedes the old filename.
-                dir.deleteFile(io, file) catch {};
+                try removeOldNames(a, io, dir, file, entry.data.raw.daily.time[0]);
             }
             try out.print("Using cached weather ({d} seconds old).\n", .{entry.age_seconds});
             try out.flush();
@@ -264,9 +275,38 @@ test "weather cache filenames include the forecast date and reject path separato
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqualStrings("nested/weather-abcd-2026-11-02.json", try datedPath(a, "nested/weather-abcd.json", "2026-11-02"));
+    try std.testing.expectEqualStrings("nested/weather-2026-11-02-abcd.json", try datedPath(a, "nested/weather-abcd.json", "2026-11-02"));
+    const earlier = try datedPath(a, "weather-ffff.json", "2026-11-01");
+    const later = try datedPath(a, "weather-0000.json", "2026-11-02");
+    try std.testing.expectEqual(std.math.Order.lt, std.mem.order(u8, earlier, later));
     try std.testing.expectError(error.InvalidWeatherData, datedPath(a, "weather.json", "../../file"));
     try std.testing.expectError(error.InvalidWeatherData, datedPath(a, "weather.json", "2026-1-02"));
+}
+
+test "date-last cache names migrate to date-first without refreshing the data" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data = try weather.parse(a, test_settings, sample);
+    const record: Record = .{ .version = 1, .fetched_at = test_time, .latitude = test_settings.latitude, .longitude = test_settings.longitude, .raw = data.raw };
+    const source = try std.json.Stringify.valueAlloc(a, record, .{});
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "weather-abcd-2026-11-02.json", .data = source });
+    var provider: FakeProvider = .{ .allocator = a, .fail = true };
+    var output: Io.Writer.Allocating = .init(a);
+    _ = try getAt(a, std.testing.io, tmp.dir, "weather-abcd.json", test_settings, test_time + 30, &output.writer, &provider);
+    try std.testing.expectEqual(@as(usize, 0), provider.calls);
+    const moved = try tmp.dir.readFileAlloc(std.testing.io, "weather-2026-11-02-abcd.json", a, .limited(128 * 1024));
+    try std.testing.expectEqualStrings(source, moved);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.readFileAlloc(std.testing.io, "weather-abcd-2026-11-02.json", a, .limited(128 * 1024)));
+    const cached = (try read(a, std.testing.io, tmp.dir, "weather-abcd.json", test_settings, test_time + 45)).?;
+    try std.testing.expectEqual(@as(i64, 45), cached.age_seconds);
+    try std.testing.expect(cached.previous_name == null);
+    // A current date-first entry also cleans up an older date-last duplicate.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "weather-abcd-2026-11-02.json", .data = source });
+    _ = try getAt(a, std.testing.io, tmp.dir, "weather-abcd.json", test_settings, test_time + 45, &output.writer, &provider);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.readFileAlloc(std.testing.io, "weather-abcd-2026-11-02.json", a, .limited(128 * 1024)));
 }
 
 test "undated weather caches migrate without downloading or resetting their age" {
@@ -288,7 +328,7 @@ test "undated weather caches migrate without downloading or resetting their age"
     try std.testing.expectError(error.FileNotFound, tmp.dir.readFileAlloc(std.testing.io, "weather.json", a, .limited(128 * 1024)));
     const cached = (try read(a, std.testing.io, tmp.dir, "weather.json", test_settings, test_time + 45)).?;
     try std.testing.expectEqual(@as(i64, 45), cached.age_seconds);
-    try std.testing.expect(!cached.legacy);
+    try std.testing.expect(cached.previous_name == null);
     _ = try getAt(a, std.testing.io, tmp.dir, "weather.json", test_settings, test_time + 45, &output.writer, &provider);
     try std.testing.expectEqual(@as(usize, 0), provider.calls);
     // Expired undated entries are removed only after a fresh dated download is saved.

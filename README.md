@@ -112,8 +112,9 @@ and previews reuse the saved data for 600 seconds (10 minutes) by default.
 
 Cache files live in `$XDG_CACHE_HOME/smart-band/`, or
 `~/.cache/smart-band/` when `XDG_CACHE_HOME` is unset. Each location has its own
-cache, named `weather-LOCATION_HASH-YYYY-MM-DD.json` using the weather location's
-local forecast date. Existing undated caches are renamed when reused, retaining
+cache, named `weather-YYYY-MM-DD-LOCATION_HASH.json` using the weather location's
+local forecast date, so filenames sort by date. Existing caches with the date
+at the end or no date are renamed when reused, retaining
 their original age. Expired, invalid, or future-dated entries trigger a fresh download, as
 does a new local calendar day so yesterday's high/low cannot be reused as today's.
 An expired cache is not used if the provider request fails. The command prints
