@@ -555,37 +555,10 @@ plus downloads exceeding 31 days and 64 blocks and stalled-cursor detection.
 They do not connect over Bluetooth. OpenSSL 3 is needed for
 the key-exchange test.
 
-On 2026-11-02 the tool read battery 42%, hardware `0.91.17.21`, and software
-`2.1.0.1` from a Xiaomi Smart Band 7. Zepp Life identifies it as the NFC variant.
-The authenticated sender completed a live handshake and negotiated notification
-service version 3. An initial authenticated write did not display; the band
-requested an app icon. After implementing the icon upload and acknowledgment,
-the user confirmed that the notification appeared on the band. A second
-notification over a fresh connection also appeared, using the cached icon.
-Clock synchronization was also tested: the band accepted the computer's local
-time and UTC offset, and its Current Time read-back matched the system clock.
-Alarm management passed a live create/edit/enable/disable/delete cycle in an
-unused slot, with every change read back and the original three alarms preserved.
-The screen-wake setting was read back as enabled, and the user confirmed that
-a subsequent notification woke the display without touch or wrist movement.
-Weather was also tested with Germantown, Tennessee: Celsius was read back as
-the selected temperature unit, the band requested current conditions, and the
-user confirmed the updated weather appeared. In a subsequent live test, opening
-Weather and scrolling to the daily forecast triggered daily and hourly forecast
-requests. The tool supplied both, and the user confirmed high and low
-temperatures appeared.
-Sleep-history download was tested on the same band: three blocks yielded
-11,553 continuous minute records, including 3,140 minutes marked as sleep.
-All three raw-block CRC32 values matched the band, sample counts matched their
-announcements, and the exported CSV row counts matched the JSON records.
-The transfer used the keep-data acknowledgment for every block.
-A repeat download retrieved 1,413 identical existing records plus three newly
-recorded minutes, confirming that the first transfer left records available.
-On 2026-11-03, `sleep --all` retrieved 65,424 continuous minute records from
-September 18 through November 3, including 14,576 minutes marked as sleep.
-All three blocks passed sample-count and CRC32 checks, and both CSV row counts
-matched the JSON records. This repeated full download succeeded with the saved
-Linux Bluetooth bond after closing the temporary pairing agent.
+Tested on Xiaomi Smart Band 7 NFC with firmware `2.1.0.1`. Notifications,
+screen wake, clock synchronization, alarm management, weather updates and
+sleep-history downloads have been verified on this device.
+
 Other models and firmware versions have not been tested.
 
 ## Protocol references
