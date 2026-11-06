@@ -60,7 +60,7 @@ See [How we retrieved the device key](DEVICE_KEY_RETRIEVAL.md) for the tested
 USB, Xiaomi account linking, and cloud-retrieval procedure.
 
 ```sh
-./zig-out/bin/smart-band --config /path/to/config.zon notify "Backup done"
+./zig-out/bin/smart-band --config ~/.config/smart-band/other-config.zon notify "Backup done"
 ```
 
 `info`, `battery`, and `inspect` accept an optional address override; `notify`
@@ -258,7 +258,7 @@ Only history still available on the band can be downloaded.
 ```sh
 ./zig-out/bin/smart-band sleep stats
 ./zig-out/bin/smart-band sleep stats --since 2026-10-27 --until 2026-11-02
-./zig-out/bin/smart-band sleep stats --input ~/.local/share/smart-band/sleep/sleep-2026-11-03-1793688977937
+./zig-out/bin/smart-band sleep stats --input ~/.local/share/smart-band/sleep/CAPTURE
 ./zig-out/bin/smart-band sleep stats --csv > daily-sleep.csv
 ```
 
@@ -266,6 +266,7 @@ Only history still available on the band can be downloaded.
 sleep directory, including captures with partial transfers. `--input DIR` selects
 either a single capture or another directory of captures. This command runs
 entirely offline and requires no device configuration or pairing key.
+Replace `CAPTURE` with a directory name printed by a sleep download.
 
 The table shows completed sleep in `H:MM`, estimated light/deep/REM durations,
 and activity coverage for each day. As in the Sleep today app, a whole completed
@@ -599,3 +600,7 @@ Other models and firmware versions have not been tested.
 
 The implementation is original Zig code. Gadgetbridge sources were consulted
 for wire-format facts; their Java implementations are not included.
+
+## License
+
+[MIT License](LICENSE). Copyright (c) 2026 zig-smart-band developers.
