@@ -1,0 +1,40 @@
+{
+  "configVersion": "v2",
+  "app": {
+    "appId": 1397502007,
+    "appIdType": 0,
+    "appType": "app",
+    "appName": "Sleep today",
+    "version": { "code": 14, "name": "0.3.2" },
+    "icon": "icon.png",
+    "vender": "Oleg",
+    "description": "Complete sleep sessions ending today, calculated on the band."
+  },
+  "permissions": ["data:user.hd.sleep"],
+  "runtime": {
+    "type": 0,
+    "apiVersion": {
+      "minVersion": "1.0.0",
+      "compatible": "1.0.0",
+      "target": "1.0.1"
+    }
+  },
+  "platforms": [
+    { "name": "mi-band7", "deviceSource": 260 },
+    { "name": "mi-band7", "deviceSource": 261 },
+    { "name": "mi-band7", "deviceSource": 262 },
+    { "name": "mi-band7", "deviceSource": 263 },
+    { "name": "mi-band7", "deviceSource": 264 },
+    { "name": "mi-band7", "deviceSource": 265 },
+    { "name": "mi-band7", "deviceSource": 266 }
+  ],
+  "module": {
+    "page": {
+      "pages": ["page/index"]
+    }
+  },
+  "designWidth": 192,
+  "defaultLanguage": "en-US",
+  "i18n": { "en-US": { "appName": "Sleep today" } },
+  "debug": false
+}

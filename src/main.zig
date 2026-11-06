@@ -10,6 +10,9 @@ const alarms = @import("alarms.zig");
 const weather = @import("weather.zig");
 const weather_cache = @import("weather_cache.zig");
 const sleep = @import("sleep.zig");
+const sleep_stats = @import("sleep_stats.zig");
+const app_install = @import("app_install.zig");
+const menu = @import("menu.zig");
 const A = std.mem.Allocator;
 const Io = std.Io;
 const discover = connect.discover;
@@ -51,9 +54,23 @@ fn help(out: *Io.Writer) !void {
         \\  smart-band sync-time          Sync the band to the computer's local time
         \\  smart-band weather            Update weather for the configured location (Celsius)
         \\  smart-band weather --preview  Fetch and print weather without Bluetooth
+        \\  smart-band weather --json     Fetch desktop weather JSON without Bluetooth
+        \\  smart-band weather --background  Sync with one bounded connection attempt
         \\  smart-band sleep [--all | --since YYYY-MM-DD] [--output DIR] [--timeout SECONDS]
         \\    Download sleep/activity history (default: last seven days); keep records on band.
         \\    --all requests all retained sleep/activity records; timeout defaults to 900 seconds.
+        \\  smart-band sleep stats [--input DIR] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--csv]
+        \\    Show completed sleep by wake-up date from saved downloads, without Bluetooth.
+        \\  smart-band install-sleep-app FILE
+        \\    Install this project's Sleep today JavaScript app; rejects OS firmware.
+        \\  smart-band apps              List installed app-package IDs and versions
+        \\  smart-band menu list         List app-menu IDs and current positions
+        \\  smart-band menu move APP POSITION
+        \\  smart-band menu up|down APP
+        \\    APP: eight-digit hex ID or a listed name, for example sleep-today.
+        \\    Positions start at 1 within the app's current section; moves are read back.
+        \\  smart-band sleep-app-debug [SECONDS]
+        \\    Capture one diagnostic snapshot from this app only (default 180s, max 240s).
         \\  smart-band alarm list
         \\  smart-band alarm add HH:MM [REPEAT] [--disabled]
         \\  smart-band alarm set ID HH:MM [REPEAT]
@@ -106,13 +123,32 @@ fn execute(init: std.process.Init) !void {
     const alarm = std.mem.eql(u8, command[0], "alarm");
     const weather_command = std.mem.eql(u8, command[0], "weather");
     const sleep_command = std.mem.eql(u8, command[0], "sleep");
-    if (!scan and !info and !battery and !inspect and !notify and !sync_time and !alarm and !weather_command and !sleep_command) return error.UnknownCommand;
-    if (!alarm and !sleep_command and command.len > 2) return error.InvalidArguments;
+    const install_sleep_app = std.mem.eql(u8, command[0], "install-sleep-app");
+    const list_apps = std.mem.eql(u8, command[0], "apps");
+    const menu_command = std.mem.eql(u8, command[0], "menu");
+    const sleep_app_debug = std.mem.eql(u8, command[0], "sleep-app-debug");
+    if (sleep_command and command.len > 1 and std.mem.eql(u8, command[1], "stats")) {
+        const options = try sleep_stats.parse(a, init.environ_map, command[2..]);
+        // Release each parsed download after merging, even though Init uses an arena.
+        try sleep_stats.run(std.heap.smp_allocator, io, options, out);
+        return;
+    }
+    if (!scan and !info and !battery and !inspect and !notify and !sync_time and !alarm and !weather_command and !sleep_command and !install_sleep_app and !list_apps and !sleep_app_debug and !menu_command) return error.UnknownCommand;
+    if (!alarm and !sleep_command and !menu_command and command.len > 2) return error.InvalidArguments;
+    const menu_request: ?menu.Command = if (menu_command) try menu.parse(command[1..]) else null;
     const alarm_request: ?alarms.Command = if (alarm) try alarms.parse(command[1..]) else null;
     const sleep_request: ?sleep.Options = if (sleep_command) try sleep.parse(a, io, init.environ_map, command[1..]) else null;
+    if (install_sleep_app and command.len != 2) return error.InvalidSleepAppPackage;
+    if (list_apps and command.len != 1) return error.InvalidArguments;
+    const sleep_app: ?app_install.Package = if (install_sleep_app) try app_install.load(a, io, command[1]) else null;
+    const debug_seconds: u8 = if (sleep_app_debug and command.len == 2)
+        std.fmt.parseInt(u8, command[1], 10) catch return error.InvalidArguments
+    else
+        180;
+    if (sleep_app_debug and (debug_seconds == 0 or debug_seconds > 240)) return error.InvalidArguments;
     if (sync_time and command.len != 1) return error.InvalidArguments;
-    const weather_preview = weather_command and command.len == 2 and std.mem.eql(u8, command[1], "--preview");
-    if (weather_command and command.len != 1 and !weather_preview) return error.InvalidArguments;
+    const weather_mode: ?weather.Command = if (weather_command) try weather.parseCommand(command[1..]) else null;
+    const weather_preview = weather_mode == .preview or weather_mode == .json;
     if (notify) {
         if (command.len != 2) return error.InvalidArguments;
         try notification.validate(command[1]);
@@ -127,24 +163,40 @@ fn execute(init: std.process.Init) !void {
     var wake_screen: ?bool = null;
     var weather_settings: ?weather.Settings = null;
     defer if (auth_key) |*key| std.crypto.secureZero(u8, key);
-    const address = if (scan) "" else if (!notify and !sync_time and !alarm and !weather_command and !sleep_command and command.len == 2) command[1] else blk: {
+    const address = if (scan) "" else if (!notify and !sync_time and !alarm and !weather_command and !sleep_command and !install_sleep_app and !list_apps and !sleep_app_debug and !menu_command and command.len == 2) command[1] else blk: {
         const path = config_path orelse try config.defaultPath(a, init.environ_map);
         const saved = try config.load(a, io, path);
         bluetooth = saved.bluetooth;
-        if (notify or sync_time or alarm or sleep_command or (weather_command and !weather_preview)) auth_key = try config.loadAuthKey(a, io, path, saved);
+        if (notify or sync_time or alarm or sleep_command or install_sleep_app or list_apps or sleep_app_debug or menu_command or (weather_command and !weather_preview)) auth_key = try config.loadAuthKey(a, io, path, saved);
         if (notify) wake_screen = saved.notification_wake_screen;
         if (weather_command) weather_settings = saved.weather orelse return error.WeatherLocationUnavailable;
         break :blk saved.device.address;
     };
     if (!scan) try bluez.validateAddress(address);
-    const weather_data: ?weather.Data = if (weather_command) try weather_cache.get(a, io, init.environ_map, weather_settings.?, out) else null;
+    var weather_log: Io.Writer.Allocating = .init(a);
+    defer weather_log.deinit();
+    const weather_data: ?weather.Data = if (weather_command) try weather_cache.get(a, io, init.environ_map, weather_settings.?, if (weather_mode == .json) &weather_log.writer else out) else null;
     if (weather_data) |data| {
+        if (weather_mode == .json) {
+            std.debug.print("{s}", .{weather_log.written()});
+            try out.print("{s}\n", .{try data.panelJson(a)});
+            return;
+        }
         try data.preview(out);
         try out.flush();
         if (weather_preview) return;
     }
     var connection = try dbus.Connection.init();
     defer connection.deinit();
+
+    if (weather_mode == .background) {
+        const snapshot = try bluez.snapshot(a, &connection);
+        if (bluez.findDevice(snapshot, address)) |device| if (device.connected) return error.BluetoothBusy;
+        bluetooth.search_timeout_seconds = @min(bluetooth.search_timeout_seconds, 10);
+        bluetooth.connect_timeout_seconds = @min(bluetooth.connect_timeout_seconds, 20);
+        bluetooth.service_timeout_seconds = @min(bluetooth.service_timeout_seconds, 15);
+        bluetooth.connect_attempts = 1;
+    }
 
     if (scan) {
         std.debug.print("Discovering for {d} seconds...\n", .{seconds});
@@ -163,7 +215,19 @@ fn execute(init: std.process.Init) !void {
     const nodes = ready.nodes;
     const device = ready.device;
 
-    if (sleep_request) |request| {
+    if (menu_request) |request| {
+        _ = readBattery(a, io, &connection, nodes, device) catch {};
+        try zepp.manageMenu(a, io, &connection, nodes, device, auth_key.?, request, out);
+    } else if (sleep_app_debug) {
+        _ = readBattery(a, io, &connection, nodes, device) catch {};
+        try zepp.debugSleepApp(a, io, &connection, nodes, device, auth_key.?, debug_seconds, out);
+    } else if (list_apps) {
+        _ = readBattery(a, io, &connection, nodes, device) catch {};
+        try zepp.listApps(a, io, &connection, nodes, device, auth_key.?, out);
+    } else if (sleep_app) |package| {
+        _ = try readBattery(a, io, &connection, nodes, device);
+        try zepp.installSleepApp(a, io, &connection, nodes, device, auth_key.?, package, out);
+    } else if (sleep_request) |request| {
         _ = readBattery(a, io, &connection, nodes, device) catch {};
         try zepp.downloadSleep(a, io, &connection, nodes, device, auth_key.?, request, out);
     } else if (weather_data) |data| {
@@ -241,6 +305,18 @@ pub fn main(init: std.process.Init) void {
             error.WeatherNotRequested => std.debug.print("The band did not request current weather. Open its Weather app while running the weather command again.\n", .{}),
             error.WeatherForecastNotRequested => std.debug.print("Run weather again, open Weather on the band, and scroll to its daily forecast while the command is connected.\n", .{}),
             error.InvalidSleepArguments, error.InvalidSleepDate => std.debug.print("Use sleep [--all | --since YYYY-MM-DD] [--output DIR] [--timeout SECONDS]. --all and --since are exclusive; timeout must be positive. Dates use the computer's local timezone and cannot be in the future.\n", .{}),
+            error.InvalidSleepStatsArguments, error.InvalidSleepStatsDate => std.debug.print("Use sleep stats [--input DIR] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--csv]. Dates are inclusive local calendar dates; --until cannot precede --since.\n", .{}),
+            error.NoSleepDownloads, error.NoSleepSamples => std.debug.print("No saved activity samples found. Download with sleep --all, or select a capture directory with sleep stats --input DIR.\n", .{}),
+            error.InvalidSleepCapture => std.debug.print("Expected a version-1 download.json with eight-byte activity samples at 60-second intervals.\n", .{}),
+            error.InvalidSleepAppPackage => std.debug.print("Supply the Sleep today app built by zig build sleep-app. Other apps and OS firmware are rejected.\n", .{}),
+            error.AppStorageFull => std.debug.print("The band has insufficient app storage for Sleep today.\n", .{}),
+            error.AppInstallBatteryLow => std.debug.print("The band rejected app installation because its battery is too low.\n", .{}),
+            error.InstalledAppNotListed => std.debug.print("The app transfer completed, but Sleep today was not found in the returned app list. Check the band's menu before retrying.\n", .{}),
+            error.InvalidMenuArguments, error.InvalidMenuApp => std.debug.print("Use menu list, menu move APP POSITION, or menu up|down APP. APP is an eight-digit hex ID or a listed name such as sleep-today.\n", .{}),
+            error.InvalidMenuPosition => std.debug.print("Menu positions start at 1 within the app's current section. Use menu list to see available positions.\n", .{}),
+            error.MenuAppNotFound, error.MenuAppHidden => std.debug.print("The selected app is not in a visible menu section. Run menu list to see app IDs and sections.\n", .{}),
+            error.InvalidMenuResponse => std.debug.print("The band returned a malformed or unsupported menu response; its entries could not be preserved.\n", .{}),
+            error.MenuChangeRejected, error.MenuChangeNotVerified => std.debug.print("The band did not confirm the requested menu order. Run menu list to inspect the current order.\n", .{}),
             error.WeatherFetchTimedOut, error.WeatherProviderFailed => std.debug.print("Could not fetch weather from Open-Meteo; try weather --preview to check the data connection.\n", .{}),
             error.DeviceNotFound, error.DeviceDisconnected, error.DBusCallFailed => std.debug.print("Keep the band nearby and awake; temporarily disconnect the phone app, then run scan.\n", .{}),
             error.PairingKeyUnavailable, error.InvalidPairingKey => std.debug.print("Save the 32 hexadecimal pairing-key digits in auth-key.hex beside the config, or set auth_key_file.\n", .{}),
@@ -272,4 +348,8 @@ test {
     _ = @import("weather.zig");
     _ = @import("weather_cache.zig");
     _ = @import("sleep.zig");
+    _ = @import("sleep_stats.zig");
+    _ = @import("app_install.zig");
+    _ = @import("menu.zig");
+    _ = @import("app_debug.zig");
 }

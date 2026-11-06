@@ -5,3 +5,6 @@ zig-pkg/
 .env.*
 
 auth-key.hex
+
+# Generated local design audit; contains a machine-specific workspace path.
+/band-apps/sleep-today/premium-audit.json

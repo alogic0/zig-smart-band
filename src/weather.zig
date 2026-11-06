@@ -3,6 +3,16 @@ const std = @import("std");
 const Io = std.Io;
 const A = std.mem.Allocator;
 
+pub const Command = enum { sync, preview, json, background };
+pub fn parseCommand(args: []const []const u8) !Command {
+    if (args.len == 0) return .sync;
+    if (args.len != 1) return error.InvalidArguments;
+    if (std.mem.eql(u8, args[0], "--preview")) return .preview;
+    if (std.mem.eql(u8, args[0], "--json")) return .json;
+    if (std.mem.eql(u8, args[0], "--background")) return .background;
+    return error.InvalidArguments;
+}
+
 pub const Settings = struct {
     location: []const u8,
     latitude: f64,
@@ -53,6 +63,33 @@ const Raw = struct {
 pub const Data = struct {
     settings: Settings,
     raw: Raw,
+
+    pub fn panelJson(self: Data, a: A) ![]u8 {
+        const Day = struct { date: []const u8, low_celsius: f64, high_celsius: f64, description: []const u8 };
+        const days = try a.alloc(Day, self.raw.daily.time.len);
+        defer a.free(days);
+        for (days, 0..) |*day, i| day.* = .{
+            .date = self.raw.daily.time[i],
+            .low_celsius = self.raw.daily.temperature_2m_min[i],
+            .high_celsius = self.raw.daily.temperature_2m_max[i],
+            .description = conditionName(self.raw.daily.weather_code[i]),
+        };
+        return json(a, .{
+            .version = 1,
+            .location = self.settings.location,
+            .temperature_celsius = self.raw.current.temperature_2m,
+            .description = conditionName(self.raw.current.weather_code),
+            .icon_name = conditionIcon(self.raw.current.weather_code),
+            .observed_at = self.raw.current.time,
+            .utc_offset_seconds = self.raw.utc_offset_seconds,
+            .humidity_percent = self.raw.current.relative_humidity_2m,
+            .wind_kph = self.raw.current.wind_speed_10m,
+            .high_celsius = days[0].high_celsius,
+            .low_celsius = days[0].low_celsius,
+            .daily = days,
+            .provider = "Open-Meteo",
+        });
+    }
 
     pub fn preview(self: Data, out: *Io.Writer) !void {
         try out.print("{s}: {d:.1} °C, {s}; humidity {d:.0}%, wind {d:.1} km/h\nUpdated {s}; Open-Meteo.\n", .{
@@ -207,6 +244,19 @@ fn conditionName(wmo: u8) []const u8 {
         71, 73, 75, 77, 85, 86 => "snow",
         95, 96, 99 => "thunderstorm",
         else => "unknown",
+    };
+}
+
+fn conditionIcon(wmo: u8) []const u8 {
+    return switch (wmo) {
+        0 => "weather-clear-symbolic",
+        1, 2 => "weather-few-clouds-symbolic",
+        3 => "weather-overcast-symbolic",
+        45, 48 => "weather-fog-symbolic",
+        51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82 => "weather-showers-symbolic",
+        71, 73, 75, 77, 85, 86 => "weather-snow-symbolic",
+        95, 96, 99 => "weather-storm-symbolic",
+        else => "weather-severe-alert-symbolic",
     };
 }
 
@@ -381,6 +431,30 @@ test "band HTTP requests and replies preserve IDs and UTF-8 byte lengths" {
 
 const sample = @embedFile("testdata/weather.json");
 const test_settings: Settings = .{ .location = "Germantown, TN", .latitude = 35.08676, .longitude = -89.81009 };
+
+test "desktop weather JSON preserves values, dates, attribution and Unicode location" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var settings = test_settings;
+    settings.location = "City \"test\" — TN";
+    const data = try parse(a, settings, sample);
+    const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, try data.panelJson(a), .{});
+    const obj = doc.object;
+    try std.testing.expectEqualStrings(settings.location, obj.get("location").?.string);
+    try std.testing.expectEqual(data.raw.current.temperature_2m, obj.get("temperature_celsius").?.float);
+    try std.testing.expectEqualStrings("weather-snow-symbolic", obj.get("icon_name").?.string);
+    try std.testing.expectEqualStrings(data.raw.daily.time[0], obj.get("daily").?.array.items[0].object.get("date").?.string);
+    try std.testing.expectEqualStrings("Open-Meteo", obj.get("provider").?.string);
+}
+
+test "weather command modes separate desktop reads from Bluetooth writes" {
+    try std.testing.expectEqual(Command.sync, try parseCommand(&.{}));
+    try std.testing.expectEqual(Command.json, try parseCommand(&.{"--json"}));
+    try std.testing.expectEqual(Command.background, try parseCommand(&.{"--background"}));
+    try std.testing.expectError(error.InvalidArguments, parseCommand(&.{"--unknown"}));
+    try std.testing.expectError(error.InvalidArguments, parseCommand(&.{ "--json", "--background" }));
+}
 
 test "weather response data owns strings, encodes Celsius and rejects misaligned provider lists" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

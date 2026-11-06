@@ -121,6 +121,16 @@ pub fn localAt(timestamp: i64) !Calendar {
 pub fn localDate(year: u16, month: u8, day: u8) !Calendar {
     const candidate: Calendar = .{ .year = year, .month = month, .day = day, .hour = 0, .minute = 0, .second = 0, .weekday = 0, .utc_quarters = 0 };
     try candidate.validate();
+    return normalizedLocalDate(year, month, day);
+}
+
+/// Advance the calendar date, allowing libc to resolve the next midnight's DST.
+pub fn nextLocalDate(date: Calendar) !Calendar {
+    try date.validate();
+    return normalizedLocalDate(date.year, date.month, date.day + 1);
+}
+
+fn normalizedLocalDate(year: u16, month: u8, day: u8) !Calendar {
     tzset();
     var tm = std.mem.zeroes(Tm);
     tm.year = @as(c_int, year) - 1900;
@@ -186,6 +196,19 @@ fn verify(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, node: blue
 
 fn verifyClock(actual: Calendar, now: i64, offset: i8) !void {
     if (@abs(try actual.unixSeconds() - now) > 5 or actual.utc_quarters != offset) return error.TimeVerificationFailed;
+}
+
+test "next local date crosses leap days and year boundaries at midnight" {
+    const leap = try nextLocalDate(try localDate(2024, 2, 28));
+    try std.testing.expectEqual(@as(u8, 29), leap.day);
+    const march = try nextLocalDate(leap);
+    try std.testing.expectEqual(@as(u8, 3), march.month);
+    try std.testing.expectEqual(@as(u8, 1), march.day);
+    const new_year = try nextLocalDate(try localDate(2026, 12, 31));
+    try std.testing.expectEqual(@as(u16, 2027), new_year.year);
+    try std.testing.expectEqual(@as(u8, 1), new_year.month);
+    try std.testing.expectEqual(@as(u8, 1), new_year.day);
+    try std.testing.expectEqual(@as(u8, 0), new_year.hour);
 }
 
 test "Zepp time encodes local date, Sunday-zero weekday, and signed UTC quarters" {

@@ -84,7 +84,113 @@ Invalid notification text, key files, and configurations fail before Bluetooth a
 - `alarm`: list, add, edit, enable, disable, or delete alarms on the configured band.
 - `weather`: fetch weather for the configured location and answer the band's
   authenticated weather requests. `weather --preview` prints the forecast.
+  `weather --json` supplies desktop JSON without Bluetooth; `--background`
+  uses one bounded Bluetooth connection attempt.
 - `sleep`: download sleep/activity history and export raw records, JSON, and CSV.
+- `sleep stats`: show daily sleep totals from saved downloads, without Bluetooth.
+- `apps`: list installed app-package IDs and versions.
+- `menu`: list the band's app menu and move apps up, down, or to a chosen position.
+- `install-sleep-app FILE`: install this project's standalone Sleep today app.
+
+## App menu order
+
+```sh
+./zig-out/bin/smart-band menu list
+./zig-out/bin/smart-band menu move sleep-today 1
+./zig-out/bin/smart-band menu down sleep-today
+./zig-out/bin/smart-band menu up sleep-today
+./zig-out/bin/smart-band menu move 534C3037 3
+```
+
+`menu list` reads the current main menu, More section, and hidden apps from the
+configured band. Each visible section shows positions starting at 1, app IDs,
+and names when known. Use an eight-digit hexadecimal ID from this listing or
+a name printed in parentheses, such as `sleep-today`, `weather`, or `alarm`.
+`sleep-today` selects this project's custom app; `sleep` selects the built-in app.
+The existing `apps` command lists installed packages and versions separately.
+
+`move APP POSITION` moves an app to that position in its current section;
+`up APP` and `down APP` move it one place. Other apps retain their relative order.
+Moves at the first/last position, or to an app's existing position, need no write.
+These commands preserve section membership and visibility, including hidden
+apps, plus every app's flags, version strings, and other returned metadata.
+The More section remains separate; these commands do not move custom apps into it.
+
+Menu commands use the same saved pairing key and Bluetooth setup as notifications.
+Each change reads the current menu, sends one update, then reads the complete
+menu back and verifies all entries before reporting success. An unconfirmed
+write is not replayed; use `menu list` to inspect the current state before retrying.
+Protocol reference: Gadgetbridge's
+[ZeppOsDisplayItemsService](https://codeberg.org/Freeyourgadget/Gadgetbridge/src/branch/master/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/huami/zeppos/services/ZeppOsDisplayItemsService.java).
+
+## Desktop weather applet
+
+The native Zig applet shows a weather icon and Celsius temperature in the top
+bar. Its menu includes high/low, conditions, a short forecast and band-sync
+status. It updates desktop weather first, then tries to synchronize the band
+every 30 minutes using the existing location and cache. Failed Bluetooth updates
+do not block the desktop display. The firmware may require opening Weather on
+the band to request its forecast; partial updates are identified in the menu.
+
+```sh
+zig build
+./zig-out/bin/smart-band-panel --install
+```
+
+It starts immediately and at desktop login through a user systemd service.
+The applet is entirely Zig with a small GTK/Ayatana ABI adapter, using installed
+runtime libraries. It requires no JavaScript, Python, or new Shell extension.
+Configure the interval in `~/.config/smart-band/panel.zon`; see
+[installation and controls](desktop/weather-panel/README.md).
+
+## Sleep today on the band
+
+`band-apps/sleep-today` contains a separate JavaScript app that calculates complete
+sleep sessions ending today directly on the Smart Band 7. Overnight sleep is
+assigned to its wake-up date, including the pre-midnight portion. It shows a
+total, Night/Naps and light/deep/REM subtotals, and an upper-edge arc toward the owner's chosen
+eight-hour daily goal. It reads once when opened and shows `Read HH:MM` afterward.
+Reopen to load fresh records; it does not reread while the page stays open.
+It uses no phone service or
+Linux statistics sync. The built-in Sleep app is preserved.
+Version 0.3.2 reads raw activity history directly from the band's local file.
+All totals and estimated stages use that source, including short sleep periods
+omitted by the native sensor. Its main window labels Night versus Naps only.
+Completed periods use their wake-up date; missing boundaries and unfinished
+periods are excluded, as in `sleep stats`.
+The caption shows the first counted night-sleep time (`Night from HH:MM`).
+Swipe up to browse the start/end times and durations of complete sleep periods
+for today and yesterday, grouped by wake-up date. The display stays on while
+the page is open; swipe right to exit and restore the normal screen timeout.
+An animated loading ring appears before collection starts, and the reader yields
+between batches so the page can draw while loading. History entries show times;
+dates appear in the day headers, with overnight starts marked as the previous day.
+The night-start caption and history use 22 px text; Night/Naps labels and values
+use 24 px text.
+
+```sh
+zig build sleep-app
+zig build
+./zig-out/bin/smart-band install-sleep-app zig-out/band-apps/sleep-today.bin
+./zig-out/bin/smart-band apps
+node --test band-apps/sleep-today/tests/*.test.cjs
+```
+
+The installer accepts only this app's ID and four expected ZIP entries, checks
+entry CRCs and both ZIP directories before Bluetooth access, and always uses
+the JavaScript-app transfer type. It sends no OS firmware or reboot command.
+Transfers are acknowledged in chunks and are not automatically replayed.
+An app-list query confirms that the package is present after installation.
+
+The local reader requires the tested `SHAREDP` version 2 identity page layout.
+It reads in bounded chunks, handles circular offsets, and rejects unknown layouts
+or metadata changes. The band uses its configured UTC offset; it has no timezone
+rule database. Native sensor stages can differ from raw estimates. See
+[the app documentation](band-apps/sleep-today/README.md) for its data contract.
+The on-band raw-reader window checksum matched a fresh Bluetooth download,
+including its missing record; the daily total and stage estimates matched the
+CLI. The user confirmed the short period appeared in Naps. The app icon uses Dialog-chip image
+metadata and its corrected rendering was confirmed on the band.
 
 ## Sleep history
 
@@ -147,6 +253,57 @@ The tool always acknowledges with the keep-data flag;
 it does not mark detailed records as consumed or delete them from the band.
 Only history still available on the band can be downloaded.
 
+### Daily sleep statistics
+
+```sh
+./zig-out/bin/smart-band sleep stats
+./zig-out/bin/smart-band sleep stats --since 2026-10-27 --until 2026-11-02
+./zig-out/bin/smart-band sleep stats --input ~/.local/share/smart-band/sleep/sleep-2026-11-03-1793688977937
+./zig-out/bin/smart-band sleep stats --csv > daily-sleep.csv
+```
+
+`sleep stats` reads `download.json` from every capture directly under the default
+sleep directory, including captures with partial transfers. `--input DIR` selects
+either a single capture or another directory of captures. This command runs
+entirely offline and requires no device configuration or pairing key.
+
+The table shows completed sleep in `H:MM`, estimated light/deep/REM durations,
+and activity coverage for each day. As in the Sleep today app, a whole completed
+sleep period is assigned to its local wake-up date, including sleep before
+midnight. Naps ending on that date are included; awake minutes do not count.
+Each unique sleep-marked minute counts once.
+Overlapping downloads are merged by UTC timestamp,
+and the newest capture replaces older classifications, including revisions from
+sleep to awake. Capture order uses the timestamp in default directory names;
+custom names use `download.json` modification time, with pathname as a tie-breaker.
+
+Saved activity records do not contain the sensor's native main-sleep window.
+The CLI infers periods from contiguous sleep-marked minutes, with observed
+non-sleep minutes immediately before and after. Awake intervals separate these
+inferred periods. Missing samples are never bridged, and periods with an
+unrecorded start or wake-up, or a future wake-up, are excluded. Native sensor
+windows and classifications can therefore still give different app totals.
+
+`--since` and `--until` select inclusive wake-up dates, after whole periods have
+been counted, so the previous evening's sleep is retained. The
+computer's current timezone is used to interpret saved UTC timestamps; prefix
+the command with `TZ=America/Chicago` to select that timezone explicitly.
+Daylight saving changes are respected: a full day can contain 23 or 25 hours.
+
+Activity coverage still uses local calendar days, midnight to midnight.
+`full` coverage means an activity sample exists for every minute of that day;
+it does not establish whether the band was worn. `partial` days show only observed
+completed sleep, and days without any samples inside the retained date range show `--`
+instead of zero. The average includes only days with full activity coverage,
+including days with zero recorded sleep, but excludes days with unresolved sleep
+periods. In-progress captures with no exported
+samples are skipped; malformed or unsupported captures report an error.
+
+`--csv` prints only a CSV header and daily rows, with integer minute counts,
+recorded and expected activity minutes, and coverage status. Missing days have
+empty sleep-duration fields. Light/deep/REM columns remain estimates derived
+from the raw scores, not device-provided stage labels.
+
 ## Weather
 
 Add a location to `~/.config/smart-band/config.zon`, using its coordinates:
@@ -203,7 +360,8 @@ converted to the band's weather icons. Air quality, weather alerts, tides, and
 moon data are not supplied.
 
 Each invocation performs one update. Run it again to refresh the band's cached
-weather. It does not install a background updater. Existing configs work with
+weather. The optional desktop applet provides periodic updates separately.
+Existing configs work with
 the optional `weather` section absent or set to `null`.
 
 ## Alarm management

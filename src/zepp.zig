@@ -9,6 +9,9 @@ const band_time = @import("band_time.zig");
 const alarms = @import("alarms.zig");
 const weather = @import("weather.zig");
 const sleep = @import("sleep.zig");
+const app_install = @import("app_install.zig");
+const app_debug = @import("app_debug.zig");
+const menu = @import("menu.zig");
 const Aes = std.crypto.core.aes.Aes128;
 const Crc = std.hash.Crc32;
 const Io = std.Io;
@@ -200,7 +203,46 @@ const Action = union(enum) {
     alarm: struct { command: alarms.Command, out: *Io.Writer },
     weather: struct { data: weather.Data, out: *Io.Writer },
     sleep: struct { options: sleep.Options, out: *Io.Writer },
+    install_sleep_app: struct { package: app_install.Package, out: *Io.Writer },
+    list_apps: *Io.Writer,
+    menu: struct { command: menu.Command, out: *Io.Writer },
+    sleep_app_debug: struct { seconds: u8, out: *Io.Writer },
 };
+
+pub fn debugSleepApp(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []const bluez.Node, device: bluez.Node, secret: [16]u8, seconds: u8, out: *Io.Writer) !void {
+    try run(a, io, connection, nodes, device, secret, .{ .sleep_app_debug = .{ .seconds = seconds, .out = out } });
+}
+
+pub fn listApps(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []const bluez.Node, device: bluez.Node, secret: [16]u8, out: *Io.Writer) !void {
+    try run(a, io, connection, nodes, device, secret, .{ .list_apps = out });
+}
+
+pub fn manageMenu(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []const bluez.Node, device: bluez.Node, secret: [16]u8, command: menu.Command, out: *Io.Writer) !void {
+    try run(a, io, connection, nodes, device, secret, .{ .menu = .{ .command = command, .out = out } });
+}
+
+const MenuTransport = struct {
+    session: *Session,
+    encrypted: bool,
+
+    pub fn send(self: *@This(), bytes: []const u8) !void {
+        try self.session.send(menu.endpoint, bytes, self.encrypted);
+    }
+
+    pub fn receive(self: *@This(), command: u8) ![]const u8 {
+        const deadline = Io.Timestamp.now(self.session.io, .awake).addDuration(.fromSeconds(20));
+        while (true) {
+            const value = try self.session.next(deadline);
+            if (value.endpoint != menu.endpoint or value.data[0] != command) continue;
+            if (value.data.len < 2) return error.InvalidMenuResponse;
+            if (value.data[1] == 1) return value.data;
+        }
+    }
+};
+
+pub fn installSleepApp(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []const bluez.Node, device: bluez.Node, secret: [16]u8, package: app_install.Package, out: *Io.Writer) !void {
+    try run(a, io, connection, nodes, device, secret, .{ .install_sleep_app = .{ .package = package, .out = out } });
+}
 
 pub fn downloadSleep(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []const bluez.Node, device: bluez.Node, secret: [16]u8, options: sleep.Options, out: *Io.Writer) !void {
     try run(a, io, connection, nodes, device, secret, .{ .sleep = .{ .options = options, .out = out } });
@@ -298,6 +340,84 @@ fn run(a: std.mem.Allocator, io: Io, connection: *dbus.Connection, nodes: []cons
     try session.send(0, &.{3}, false);
     const services = try session.receive(0);
     const alert = switch (action) {
+        .menu => |value| {
+            var transport: MenuTransport = .{ .session = &session, .encrypted = try serviceEncryption(services, menu.endpoint) };
+            try menu.execute(a, &transport, value.command, value.out);
+            return;
+        },
+        .sleep_app_debug => |value| {
+            const encrypted_logs = try serviceEncryption(services, 0x3a);
+            try session.send(0x3a, &.{1}, encrypted_logs);
+            const caps = try session.receiveMatching(0x3a, 2);
+            if (caps.len < 5 or caps[1] != 1) return error.UnsupportedAppLogService;
+            const name_end = std.mem.indexOfScalarPos(u8, caps, 4, 0) orelse caps.len;
+            if (name_end - 4 > 128) return error.UnsupportedAppLogService;
+            const request = try a.alloc(u8, 1 + name_end - 4 + 1);
+            defer a.free(request);
+            request[0] = 3;
+            @memcpy(request[1 .. request.len - 1], caps[4..name_end]);
+            request[request.len - 1] = 0;
+            try session.send(0x3a, request, encrypted_logs);
+            const started = try session.receiveMatching(0x3a, 4);
+            if (started.len < 3 or started[1] != 1) return error.AppLogStartFailed;
+            const log_session = started[2];
+            defer {
+                session.send(0x3a, &.{ 5, 0, log_session }, encrypted_logs) catch {};
+                _ = session.receiveMatching(0x3a, 6) catch &.{};
+            }
+            try value.out.writeAll("Listening only for Sleep today diagnostics. Open the updated app and tap Refresh.\n");
+            try value.out.flush();
+            const deadline = Io.Timestamp.now(io, .awake).addDuration(.fromSeconds(value.seconds));
+            var capture: app_debug.Assembler = .{};
+            defer std.crypto.secureZero(u8, &capture.buffer);
+            while (true) {
+                const message = session.next(deadline) catch |err| {
+                    if (capture.used > 0) {
+                        try value.out.print("Partial Sleep today diagnostic: {s}\n", .{capture.buffer[0..capture.used]});
+                        try value.out.flush();
+                    }
+                    return err;
+                };
+                if (message.endpoint != 0x3a) continue;
+                if (message.data[0] == 8) {
+                    try session.send(0x3a, &.{9}, encrypted_logs);
+                    continue;
+                }
+                if (try capture.push(message.data, log_session)) |json| {
+                    try value.out.print("SLEEP_TODAY_DIAG {s}\n", .{json});
+                    try value.out.flush();
+                    return;
+                }
+            }
+        },
+        .list_apps => |out| {
+            const encrypted_apps = try serviceEncryption(services, 0xa0);
+            var request: [16]u8 = @splat(0);
+            request[0..3].* = .{ 2, 1, 1 };
+            try session.send(0xa0, &request, encrypted_apps);
+            const listing = try session.receiveMatching(0xa0, 2);
+            const installed = try app_install.listed(listing);
+            try out.print("Band app packages: {s}\nSleep today listed: {any}\n", .{ std.mem.trim(u8, listing[16..], "\x00 "), installed });
+            return;
+        },
+        .install_sleep_app => |value| {
+            // The legacy app-install channel needs exclusive notifications.
+            // Stop the normal Zepp receiver after authentication and MTU setup.
+            receiver.deinit();
+            try app_install.fromBand(a, io, connection, nodes, device, value.package, att_payload, value.out);
+            try receiver.start(a);
+            const encrypted_apps = try serviceEncryption(services, 0xa0);
+            var request: [16]u8 = @splat(0);
+            request[0..3].* = .{ 2, 1, 1 };
+            try session.send(0xa0, &request, encrypted_apps);
+            const listing = try session.receiveMatching(0xa0, 2);
+            if (!try app_install.listed(listing)) {
+                try value.out.print("Band app packages after transfer: {s}\n", .{std.mem.trim(u8, listing[16..], "\x00 ")});
+                return error.InstalledAppNotListed;
+            }
+            try value.out.writeAll("Sleep today installed and listed by the band. Open it from the band's app menu.\n");
+            return;
+        },
         .sleep => |value| {
             try sleep.fromBand(a, io, connection, nodes, device, value.options, value.out, .{ .context = &session, .process = Session.maintain });
             return;
